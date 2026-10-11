@@ -1,0 +1,244 @@
+import * as THREE from "three";
+import { PALETTE } from "./types";
+
+export interface CharacterHandle {
+  group: THREE.Group;
+  /** bayangan blob di bawah karakter */
+  shadow: THREE.Mesh;
+  /** animasi & update per frame */
+  update: (params: {
+    dt: number;
+    t: number;
+    moving: boolean;
+    speedNorm: number;
+    grounded: boolean;
+    gliding: boolean;
+    dashing: boolean;
+    targetYaw: number | null;
+  }) => void;
+  /** squash saat mendarat */
+  onLand: () => void;
+  /** front-flip 360 saat double jump */
+  onDoubleJump: () => void;
+  dispose: () => void;
+}
+
+/**
+ * Karakter burung kertas: badan telur krem, mata titik hitam,
+ * paruh kecil oranye, sayap, kaki batang, satu ahoge.
+ * Struktur: root (yaw) → flipGroup (flip double-jump) → bagian tubuh.
+ */
+export function createPaperBird(scene: THREE.Scene): CharacterHandle {
+  const disposables: Array<{ dispose: () => void }> = [];
+
+  const group = new THREE.Group();
+  const flipGroup = new THREE.Group();
+  group.add(flipGroup);
+
+  const toon = (color: number) => {
+    const m = new THREE.MeshToonMaterial({ color });
+    disposables.push(m);
+    return m;
+  };
+
+  const bodyMat = toon(PALETTE.charBody);
+  const wingMat = toon(PALETTE.charWing);
+  const darkMat = toon(PALETTE.charDark);
+  const beakMat = toon(PALETTE.charBeak);
+
+  // ---- badan: telur ----
+  const bodyGeo = new THREE.SphereGeometry(0.34, 24, 20);
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  body.scale.set(1, 1.28, 1);
+  body.position.y = 0.52;
+  flipGroup.add(body);
+  disposables.push(bodyGeo);
+
+  // ---- mata titik hitam ----
+  const eyes: THREE.Mesh[] = [];
+  const eyeGeo = new THREE.SphereGeometry(0.052, 12, 10);
+  const eyeMat = new THREE.MeshBasicMaterial({ color: 0x14121a });
+  disposables.push(eyeGeo, eyeMat);
+  for (const sx of [-1, 1]) {
+    const eye = new THREE.Mesh(eyeGeo, eyeMat);
+    eye.position.set(0.115 * sx, 0.63, 0.285);
+    flipGroup.add(eye);
+    eyes.push(eye);
+  }
+
+  // ---- paruh kecil ----
+  const beakGeo = new THREE.ConeGeometry(0.06, 0.16, 10);
+  const beak = new THREE.Mesh(beakGeo, beakMat);
+  beak.rotation.x = Math.PI * 0.52;
+  beak.position.set(0, 0.52, 0.34);
+  flipGroup.add(beak);
+  disposables.push(beakGeo);
+
+  // ---- sayap (pivot di bahu) ----
+  const makeWing = (side: -1 | 1) => {
+    const pivot = new THREE.Group();
+    pivot.position.set(0.3 * side, 0.6, 0.02);
+    const wingGeo = new THREE.SphereGeometry(0.16, 14, 12);
+    const wing = new THREE.Mesh(wingGeo, wingMat);
+    wing.scale.set(0.55, 1.15, 0.8);
+    wing.position.set(0.06 * side, -0.12, 0);
+    wing.rotation.z = -0.35 * side;
+    pivot.add(wing);
+    disposables.push(wingGeo);
+    flipGroup.add(pivot);
+    return pivot;
+  };
+  const wingL = makeWing(-1);
+  const wingR = makeWing(1);
+
+  // ---- kaki batang ----
+  const makeLeg = (side: -1 | 1) => {
+    const pivot = new THREE.Group();
+    pivot.position.set(0.11 * side, 0.26, 0);
+    const legGeo = new THREE.CylinderGeometry(0.026, 0.026, 0.26, 8);
+    const leg = new THREE.Mesh(legGeo, darkMat);
+    leg.position.y = -0.13;
+    pivot.add(leg);
+    const footGeo = new THREE.BoxGeometry(0.11, 0.035, 0.14);
+    const foot = new THREE.Mesh(footGeo, darkMat);
+    foot.position.set(0, -0.26, 0.04);
+    pivot.add(foot);
+    disposables.push(legGeo, footGeo);
+    flipGroup.add(pivot);
+    return pivot;
+  };
+  const legL = makeLeg(-1);
+  const legR = makeLeg(1);
+
+  // ---- ahoge ----
+  const ahogeGeo = new THREE.CylinderGeometry(0.008, 0.004, 0.16, 6);
+  const ahoge = new THREE.Mesh(ahogeGeo, wingMat);
+  ahoge.position.set(0.03, 0.985, 0);
+  ahoge.rotation.z = -0.28;
+  flipGroup.add(ahoge);
+  disposables.push(ahogeGeo);
+
+  // ---- syal kecil warna aksen (biar semangat) ----
+  const scarfGeo = new THREE.TorusGeometry(0.22, 0.05, 8, 16);
+  const scarf = new THREE.Mesh(scarfGeo, toon(PALETTE.accent));
+  scarf.rotation.x = Math.PI / 2;
+  scarf.position.y = 0.42;
+  flipGroup.add(scarf);
+  disposables.push(scarfGeo);
+
+  // ---- bayangan blob ----
+  const shadowGeo = new THREE.CircleGeometry(0.42, 24);
+  const shadowMat = new THREE.MeshBasicMaterial({
+    color: 0x1c1813,
+    transparent: true,
+    opacity: 0.22,
+    depthWrite: false,
+  });
+  const shadow = new THREE.Mesh(shadowGeo, shadowMat);
+  shadow.rotation.x = -Math.PI / 2;
+  shadow.position.y = 0.02;
+  scene.add(shadow);
+  disposables.push(shadowGeo, shadowMat);
+
+  scene.add(group);
+
+  // ================= state animasi =================
+  const bodyScale = body.scale.clone();
+  let walkPhase = 0;
+  let squash = 0;
+  let blinkTimer = 2.5 + Math.random() * 2.5;
+  let blinkT = -1;
+  let smoothYaw = 0;
+  let flipT = 0; // sisa waktu flip
+
+  return {
+    group,
+    shadow,
+    update({ dt, t, moving, speedNorm, grounded, gliding, dashing, targetYaw }) {
+      // --- rotasi badan menghadap arah gerak ---
+      if (targetYaw !== null) {
+        let diff = targetYaw - smoothYaw;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        smoothYaw += diff * Math.min(1, 12 * dt);
+        group.rotation.y = smoothYaw;
+      }
+
+      // --- flip double jump (front-flip 360°) ---
+      if (flipT > 0) {
+        flipT = Math.max(0, flipT - dt);
+        const p = 1 - flipT / 0.5;
+        flipGroup.rotation.x = p * Math.PI * 2;
+      } else {
+        flipGroup.rotation.x = 0;
+      }
+
+      // --- siklus jalan ---
+      walkPhase += dt * (moving ? 8 + speedNorm * 6 : 0);
+      const legSwing = moving ? Math.sin(walkPhase) * 0.85 : 0;
+      legL.rotation.x = legSwing;
+      legR.rotation.x = -legSwing;
+
+      // --- badan: bob & napas ---
+      const idleBreath = 1 + Math.sin(t * 2.1) * 0.02;
+      const walkBob = moving ? Math.abs(Math.sin(walkPhase)) * 0.05 : 0;
+      body.position.y = 0.52 + walkBob;
+      // condong saat lari / dash
+      const lean = dashing ? 0.38 : moving ? 0.1 * speedNorm : 0;
+      body.rotation.x += (lean - body.rotation.x) * Math.min(1, 10 * dt);
+      ahoge.rotation.z =
+        -0.28 + Math.sin(t * 3.2) * 0.1 + (moving ? Math.sin(walkPhase * 2) * 0.15 : 0);
+
+      // --- squash & stretch saat mendarat ---
+      squash = Math.max(0, squash - dt * 5);
+      const sq = squash * 0.35;
+      body.scale.set(
+        bodyScale.x * (1 + sq * 0.5),
+        bodyScale.y * (1 - sq) * idleBreath,
+        bodyScale.z * (1 + sq * 0.5)
+      );
+
+      // --- sayap ---
+      if (dashing) {
+        // sayap menyapu ke belakang saat dash
+        wingL.rotation.z += (-1.15 - wingL.rotation.z) * Math.min(1, 12 * dt);
+        wingR.rotation.z += (1.15 - wingR.rotation.z) * Math.min(1, 12 * dt);
+      } else if (!grounded) {
+        const flapSpeed = gliding ? 10 : 26;
+        const flapAmp = gliding ? 0.9 : 0.7;
+        const f = Math.sin(t * flapSpeed) * flapAmp;
+        wingL.rotation.z = -(0.25 + f);
+        wingR.rotation.z = 0.25 + f;
+        legL.rotation.x = -0.45 + Math.sin(t * 8) * 0.08;
+        legR.rotation.x = -0.3 + Math.sin(t * 8 + 1) * 0.08;
+      } else {
+        wingL.rotation.z += (0 - wingL.rotation.z) * Math.min(1, 8 * dt);
+        wingR.rotation.z += (0 - wingR.rotation.z) * Math.min(1, 8 * dt);
+      }
+
+      // --- kedipan mata ---
+      blinkTimer -= dt;
+      if (blinkT < 0 && blinkTimer <= 0) {
+        blinkT = 0;
+        blinkTimer = 2.5 + Math.random() * 3.5;
+      }
+      if (blinkT >= 0) {
+        blinkT += dt;
+        const p = blinkT / 0.14;
+        const s = p < 1 ? Math.max(0.08, 1 - Math.sin(p * Math.PI)) : 1;
+        for (const e of eyes) e.scale.y = s;
+        if (p >= 1) blinkT = -1;
+      }
+    },
+    onLand() {
+      squash = 1;
+    },
+    onDoubleJump() {
+      flipT = 0.5;
+    },
+    dispose() {
+      scene.remove(group, shadow);
+      for (const d of disposables) d.dispose();
+    },
+  };
+}
