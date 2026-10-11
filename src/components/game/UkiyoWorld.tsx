@@ -288,8 +288,8 @@ export default function UkiyoWorld() {
       },
       onPresence: (n) => setPresence(n),
       },
-      // host PartyKit dari env — kosong = mode solo (multiplayer off)
-      { multiplayerHost: process.env.NEXT_PUBLIC_PARTYKIT_HOST || "" }
+      // host ruang multiplayer dari env — kosong = mode solo (multiplayer off)
+      { multiplayerHost: process.env.NEXT_PUBLIC_PARTY_HOST || "" }
     );
     engineRef.current = engine;
     engine.setInputEnabled(false); // tunggu intro selesai

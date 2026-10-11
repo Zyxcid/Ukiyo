@@ -1,0 +1,39 @@
+// ============================================================
+// zyxcid — ukiyo · konfigurasi Cloudflare Worker (PartyServer)
+// Menggantikan partykit.json — platform managed PartyKit sudah tutup.
+// Deploy: npm run party:deploy  (=> npx wrangler deploy)
+// ============================================================
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+
+  // nama worker → alamat https://ukiyo.<subdomain-akun>.workers.dev
+  "name": "ukiyo",
+  "main": "party/server.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Durable Object = "ruang" multiplayer. Nama binding `Main` menentukan
+  // path /parties/main/:room — klien (partysocket) sudah konek ke sana.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "Main",
+        "class_name": "UkiyoServer"
+      }
+    ]
+  },
+
+  // Migrasi awal DO ber-storage SQLite (ikut plan gratis Workers).
+  // Tambah entri baru jika menambah/mengganti nama class server.
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["UkiyoServer"]
+    }
+  ],
+
+  // `npm run party:dev` → ruang lokal di http://127.0.0.1:1999
+  "dev": {
+    "port": 1999
+  }
+}

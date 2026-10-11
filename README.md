@@ -6,7 +6,7 @@ Portofolio interaktif berbentuk game **platformer 3D** dengan nuansa kertas & ti
 
 **Lingkungan mengikuti jam nyata pengunjung**: pagi, siang, sore, senja, hingga malam berbulan & berbintang — semuanya dihitung lokal di browser.
 
-Situsnya **tanpa akun & tanpa database**. Multiplayer-nya pun opsional: hanya me-relay posisi pengunjung yang sedang online (lihat seksi *Multiplayer*), tanpa menyimpan apa pun setelah koneksi tertutup.
+Situsnya **tanpa akun & tanpa database**. Multiplayer-nya pun opsional: hanya me-relay posisi pengunjung yang sedang online (lihat seksi *Multiplayer*) — sekarang berjalan di **Cloudflare Workers milikmu sendiri**, tanpa menyimpan apa pun setelah koneksi tertutup.
 
 Dibangun dengan **Next.js 16 (App Router) + React 19 + TypeScript + Tailwind CSS 4 + three.js**.
 
@@ -41,7 +41,7 @@ npm run build        # next build + salin aset (Node murni, aman di Windows)
 npm start            # menjalankan server standalone
 ```
 
-Catatan: `npm install` juga memasang alat PartyKit (devDependency, termasuk binary `workerd` ±130 MB). Kalau tidak butuh multiplayer dan ingin instalasi ramping: `npm install --omit=dev` lalu pasang ulang dev tool (`npm i -D partykit`) saat hendak meng-deploy ruang multiplayer.
+Catatan: `npm install` juga memasang **wrangler** (alat CLI Cloudflare, devDependency, termasuk binary `workerd` ±130 MB) yang dipakai untuk mode multiplayer. Kalau tidak butuh multiplayer dan ingin instalasi ramping: `npm install --omit=dev`, lalu pasang ulang saat hendak meng-deploy ruang multiplayer (`npm i -D wrangler partyserver`).
 
 ## Siklus siang–malam (jam realtime)
 
@@ -64,41 +64,43 @@ Chip kecil di kanan atas HUD menampilkan fase + jam saat ini. Semua dihitung di 
 
 Situs bisa menampilkan **tamu lain yang sedang membuka halaman yang sama**: burung kertas dengan syal warna acak + label nama samaran ("tamu 42"), melayang dan bergerak mengikuti posisi mereka sungguhan. Tanpa chat, tanpa akun, tanpa data yang disimpan — begitu tab ditutup, tamunya hilang.
 
+> **Pembaruan v0.3:** platform managed **PartyKit sudah ditutup** (9 Okt 2026 berhenti menerima proyek baru, 23 Okt 2026 mati total). Ruang multiplayer sekarang berjalan sebagai **Cloudflare Worker + Durable Object ("PartyServer") di akun Cloudflare milikmu sendiri** — deploy dengan `wrangler`, tidak ada lagi perantara pihak ketiga. Kode klien tidak berubah; variabel environment berganti nama jadi `NEXT_PUBLIC_PARTY_HOST`.
+
 ### Cara kerja & prinsip
 
 - Situs utama **tetap statis** (Vercel/static hosting apa pun). Yang ditambahkan hanyalah **satu koneksi WebSocket kecil** ke sebuah "ruang" (room) bernama `dunia`.
-- Server ruangnya (`party/server.ts`) cuma **me-relay pesan posisi** antar pengunjung (~100 byte, ±9×/detik). Tidak ada database, tidak ada penyimpanan, tidak ada chat.
+- Server ruangnya (`party/server.ts`, di-deploy sebagai Cloudflare Worker via `wrangler.jsonc`) cuma **me-relay pesan posisi** antar pengunjung (~100 byte, ±9×/detik), dengan **hibernation WebSocket** supaya hemat kuota. Tidak ada database, tidak ada penyimpanan, tidak ada chat.
 - Identitas tamu hanya hidup **di memori tab** — id acak + nama samaran. Muat ulang halaman = jadi "tamu baru". Menutup/minimalkan tab = tamunya menghilang untuk orang lain (memang begitu rancangnya: kamu hanya melihat orang yang benar-benar sedang melihat situsnya).
 - **Degradasi halus**: kalau ruang tidak tersedia / host tidak diisi, game tetap jalan 100% mode solo — tanpa error, tanpa UI aneh.
 
 ### Mengaktifkan
 
-**1. Deploy ruangnya sekali** (butuh akun PartyKit gratis):
+**1. Deploy ruangnya sekali** (butuh akun Cloudflare gratis — <https://dash.cloudflare.com/sign-up>):
 
 ```bash
-npm run party:login    # = npx partykit login (buka browser, buat akun gratis)
-npm run party:deploy   # = npx partykit deploy → cetak alamat ruangmu
+npm run party:login    # = npx wrangler login (buka browser, izinkan akses akunmu)
+npm run party:deploy   # = npx wrangler deploy → cetak alamat ruangmu
 ```
 
-Catat alamat yang tercetak, contoh: `ukiyo.namakamu.partykit.party`
+Catat alamat yang tercetak, contoh: `ukiyo.nama-akun-kamu.workers.dev`
 
 **2. Beri tahu situs alamat itu** — dua cara:
 
-- **Vercel (produksi):** Project → Settings → Environment Variables → tambah `NEXT_PUBLIC_PARTYKIT_HOST` = alamat ruang → deploy ulang.
-- **Lokal:** salin `.env.example` jadi `.env.local`, isi `NEXT_PUBLIC_PARTYKIT_HOST=...`, jalankan `npm run dev`.
+- **Vercel (produksi):** Project → Settings → Environment Variables → tambah `NEXT_PUBLIC_PARTY_HOST` = alamat ruang → deploy ulang.
+- **Lokal:** salin `.env.example` jadi `.env.local`, isi `NEXT_PUBLIC_PARTY_HOST=...`, jalankan `npm run dev`.
 
-**3. Uji lokal tanpa deploy:** jalankan `npm run party:dev` (ruang lokal di `127.0.0.1:1999`), lalu isi `.env.local` dengan `NEXT_PUBLIC_PARTYKIT_HOST=127.0.0.1:1999` dan `npm run dev`. Buka situs di dua jendela browser berbeda — dua burung saling melihat.
+**3. Uji lokal tanpa deploy:** jalankan `npm run party:dev` (ruang lokal `wrangler dev` di `127.0.0.1:1999`), lalu isi `.env.local` dengan `NEXT_PUBLIC_PARTY_HOST=127.0.0.1:1999` dan `npm run dev`. Buka situs di dua jendela browser berbeda — dua burung saling melihat.
 
 ### Hal yang perlu kamu tahu (trade-off)
 
-- **Ini satu-satunya bagian yang tidak 100% milikmu.** Situs tetap statis, tapi relay presence-nya jalan di server PartyKit (di atas Cloudflare). Kalau layanan itu down/berubah kebijakan, multiplayer mati sementara — game tetap jalan mode solo.
-- **Kuota gratis**: untuk situs personal (puluhan pengunjung serentak) longgar. Kalau trafiknya besar, kuota bisa tersentuh dan layak dipindah ke tier berbayar / self-host di Cloudflare Workers sendiri. Cek harga terkini di <https://www.partykit.io>.
+- **100% milikmu.** Relay presence berjalan sebagai Worker di akun Cloudflare sendiri — bukan lagi layanan pihak ketiga. Situs utama tetap statis di Vercel; kalau Worker-nya sengaja kamu hapus/matikan, multiplayer mati dengan halus dan game tetap jalan mode solo.
+- **Kuota gratis Cloudflare Workers**: sudah termasuk Durable Object ber-storage SQLite — untuk situs personal (puluhan pengunjung serentak) sangat longgar. Kalau trafiknya membesar, baru pertimbangkan tier berbayar. Cek harga terkini di <https://workers.cloudflare.com/#plans>.
 - **Privasi ringan**: posisi & nama samaranmu ter-relay ke pengunjung lain (tanpa IP, tanpa identitas asli). Tidak ada teks bebas — nama otomatis — jadi tidak ada masalah moderasi/chat.
 - **Presence ≠ interaksi penuh**: tamu lain tidak bisa bertabrakan/saling dorong; mereka murni "hantu" yang terlihat. Kalau nanti mau chat/interaksi, itu upgrade rancangan tersendiri.
 
 ### Mematikan
 
-Kosongkan / hapus variabel `NEXT_PUBLIC_PARTYKIT_HOST` → situs kembali murni solo & statis.
+Kosongkan / hapus variabel `NEXT_PUBLIC_PARTY_HOST` → situs kembali murni solo & statis.
 
 ## Deploy ke Vercel
 
@@ -106,7 +108,7 @@ Kosongkan / hapus variabel `NEXT_PUBLIC_PARTYKIT_HOST` → situs kembali murni s
 
 1. Push folder ini ke repo GitHub milikmu.
 2. Buka <https://vercel.com/new>, pilih repo tadi.
-3. Framework terdeteksi otomatis sebagai **Next.js** — biarkan default. (Opsional: set `NEXT_PUBLIC_PARTYKIT_HOST` seperti di seksi Multiplayer.)
+3. Framework terdeteksi otomatis sebagai **Next.js** — biarkan default. (Opsional: set `NEXT_PUBLIC_PARTY_HOST` seperti di seksi Multiplayer.)
 4. Deploy. Selesai.
 
 **Cara 2 — lewat CLI:**
@@ -185,9 +187,11 @@ Sumber input (keyboard, mouse, sentuh, dan **gamepad**) ada di `src/components/g
 
 ### 4) Multiplayer
 
-- `party/server.ts` — ruang relay (protocol, batas klien, pesan "bye"). Ubah di sini kalau mau menambahkan fitur presence baru (mis. emote).
+- `party/server.ts` — ruang relay PartyServer (protocol, batas klien, pesan "bye"). Ubah di sini kalau mau menambahkan fitur presence baru (mis. emote).
+- `wrangler.jsonc` — konfigurasi Worker: nama (`ukiyo`), binding Durable Object `Main`, migrasi SQLite, port dev lokal. Nama binding `Main` menentukan path `/parties/main/:room` yang dipakai klien.
 - `src/components/game/multiplayer.ts` — sisi klien: penampilan burung kertas tamu, interpolasi, laju kirim, batas tamu. Ghost-nya bisa diganti model lain dengan bebas.
 - Ruang yang dipakai semua orang: `room: "dunia"` di `multiplayer.ts` — semua pengunjung dunia yang sama saling melihat.
+- Cek tipe servernya terpisah: `npm run party:typecheck` (pakai `party/tsconfig.json` + `@cloudflare/workers-types`, terpisah dari tsconfig Next.js agar dua dunia type tidak bertabrakan).
 
 ## Membuat model 3D secara visual (tanpa menulis geometri manual)
 
@@ -210,7 +214,9 @@ src/
 │   └── ui/              # komponen dasar (shadcn/ui)
 ├── hooks/               # helper React
 └── lib/                 # data proyek & util
-party/server.ts          # ruang multiplayer PartyKit (relay presence)
+party/server.ts          # ruang multiplayer PartyServer (relay presence)
+party/tsconfig.json      # tsconfig khusus worker (Cloudflare types)
+wrangler.jsonc           # konfigurasi Cloudflare Worker (deploy party:*)
 scripts/postbuild.mjs    # salin aset build (cross-platform)
 public/                  # aset statis
 ```

@@ -110,7 +110,7 @@ export class GameEngine {
     this.input.camDist = 11;
     this.input.onTalkKey = () => this.tryTalk();
 
-    // ---- multiplayer (opsional): tamu lain bila host PartyKit diset ----
+    // ---- multiplayer (opsional): tamu lain bila host ruang diset ----
     if (opts.multiplayerHost) {
       this.multiplayer = new Multiplayer({
         host: opts.multiplayerHost,
