@@ -13,16 +13,35 @@ import { id as idLocale } from "date-fns/locale";
 import {
   ArrowBigUpDash,
   ArrowRight,
+  Armchair,
+  BookOpen,
+  CalendarClock,
   Check,
+  Crown,
+  DoorOpen,
   ExternalLink,
   Gamepad2,
   Github,
+  Hand,
+  Heart,
+  Landmark,
+  Languages,
+  Library,
   List,
+  ListChecks,
+  Lock,
   MapPin,
   MessageCircle,
   Moon,
   MousePointer2,
   Move,
+  Music,
+  PenLine,
+  RefreshCw,
+  RotateCcw,
+  RotateCw,
+  Smartphone,
+  Sparkles,
   Star,
   Sun,
   Sunrise,
@@ -38,9 +57,40 @@ import { GITHUB_PROFILE, PROJECTS, type Project } from "@/lib/projects";
 import { GameEngine } from "./engine";
 import { currentHour, phaseName } from "./daycycle";
 import { NPC_COLOR_HEX } from "./npcs";
+import {
+  EMOTES,
+  emoteById,
+  emoteUnlocked,
+  unlockStars,
+  loadMaxStars,
+  loadGoldScarf,
+} from "./emotes";
 import type { PlayerAction } from "./types";
 
 const emptySubscribe = () => () => {};
+
+/** Ikon fitur pameran (berurut mengikuti daftar features Kanjichō) */
+const FEATURE_ICONS = [
+  ListChecks,
+  CalendarClock,
+  RotateCcw,
+  Library,
+  PenLine,
+  BookOpen,
+  Languages,
+  Smartphone,
+];
+
+/** Ikon tiap emote (urut EMOTES) */
+const EMOTE_ICONS: Record<string, typeof Hand> = {
+  wave: Hand,
+  dance: Music,
+  spin: RotateCw,
+  flip: RefreshCw,
+  sit: Armchair,
+  hearts: Heart,
+  glitter: Sparkles,
+};
 
 function monthsSince(iso: string): number {
   return (Date.now() - new Date(iso).getTime()) / 2.63e9;
@@ -227,6 +277,26 @@ export default function UkiyoWorld() {
   const berandaTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const doneHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // pameran gedung proyek (Kanji Hall dkk.)
+  const [nearDoor, setNearDoor] = useState<number | null>(null);
+  const [exhibitIsland, setExhibitIsland] = useState<number | null>(null);
+  const [galleryIdx, setGalleryIdx] = useState(0);
+  // interior 3D + emote
+  const [insideIsland, setInsideIsland] = useState<number | null>(null);
+  const [insideNear, setInsideNear] = useState<{
+    kind: "exit" | "shot" | "book" | "pad";
+    caption?: string;
+    galleryIdx?: number;
+  } | null>(null);
+  const [wheelOpen, setWheelOpen] = useState(false);
+  // pencapaian tersimpan dibaca sekali saat mount (client) — aman: hanya
+  // memengaruhi konten roda emote yang tidak dirender saat SSR
+  const [maxStarsSaved] = useState(() => loadMaxStars());
+  const [scarfUnlocked] = useState(() => loadGoldScarf());
+  const [scarfOn, setScarfOn] = useState(() => loadGoldScarf());
+  const seenUnlocksRef = useRef<Set<string>>(new Set());
+  const insideToastRef = useRef(false);
+
   const currentProject: Project | null =
     currentPlatform !== null && currentPlatform >= 1
       ? PROJECTS[currentPlatform - 1]
@@ -278,6 +348,66 @@ export default function UkiyoWorld() {
         }
       },
       onNpcNear: (islandIndex) => setNearNpc(islandIndex),
+      onDoorNear: (islandIndex) => setNearDoor(islandIndex),
+      onBuildingInside: (islandIndex) => {
+        setInsideIsland(islandIndex);
+        if (islandIndex !== null && !insideToastRef.current) {
+          insideToastRef.current = true;
+          const name = PROJECTS[islandIndex - 1]?.name ?? "proyek";
+          toast({
+            title: `Masuk ${name}`,
+            description:
+              "Jelajahi ruangannya — kuis kanji di tengah, pameran di dinding. E untuk interaksi, pintu keluar di belakang.",
+          });
+        }
+      },
+      onInsideNear: (near) => setInsideNear(near),
+      onQuizResult: (correct, streak) => {
+        if (correct) {
+          toast({
+            title: "Benar!",
+            description:
+              streak >= 2
+                ? `${streak} beruntun — sugoi!`
+                : "Jawaban tepat. Soal berikutnya sebentar lagi…",
+          });
+        } else {
+          toast({
+            title: "Belum tepat",
+            description: "Coba soal berikutnya — bacaannya ditampilkan di papan.",
+          });
+        }
+      },
+      onEnterBuilding: (islandIndex, gIdx) => {
+        setExhibitIsland(islandIndex);
+        setGalleryIdx(gIdx ?? 0);
+      },
+      onEmoteBlocked: (emoteId, need) => {
+        const def = emoteById(emoteId);
+        toast({
+          title: "Emote masih terkunci",
+          description: `Kumpulkan ${need} bintang untuk membuka “${def?.label ?? emoteId}”.`,
+        });
+      },
+      onEmoteUnlocked: (emoteId) => {
+        const def = emoteById(emoteId);
+        if (!def || seenUnlocksRef.current.has(emoteId)) return;
+        seenUnlocksRef.current.add(emoteId);
+        toast({
+          title: "Emote baru terbuka!",
+          description: `“${def.label}” — tekan Q lalu pilih, atau tombol ${
+            EMOTES.findIndex((d) => d.id === emoteId) + 1
+          }.`,
+        });
+      },
+      onScarfUnlock: () => {
+        setScarfOn(true);
+        toast({
+          title: "Syal emas terbuka!",
+          description:
+            "Hadiah karena semua bintang terkumpul — kenakan lewat roda emote (Q).",
+        });
+      },
       onTalk: (info) => setTalk(info),
       onStar: (c, total) => setStarCount({ c, total }),
       onAllStars: () => {
@@ -300,6 +430,18 @@ export default function UkiyoWorld() {
     engine.input.onControlsKey = () => {
       if (startedRef.current) setControlsOpen((v) => !v);
     };
+    // emote: Q buka roda, 1-7 mainkan, gamepad LB siklus / RB roda
+    engine.input.onEmoteKey = (slot) => {
+      if (!startedRef.current) return;
+      if (typeof slot === "number") {
+        const def = EMOTES[slot - 1];
+        if (def) engine.playEmote(def.id);
+      } else if (slot === "next") {
+        engine.playNextEmote();
+      } else {
+        setWheelOpen((v) => !v);
+      }
+    };
     engine.setBubbleEl(bubbleRef.current);
     // hook debug (hanya dev; digunakan untuk verifikasi otomatis)
     (window as unknown as { __zyxEngine?: GameEngine }).__zyxEngine = engine;
@@ -317,8 +459,10 @@ export default function UkiyoWorld() {
   useEffect(() => {
     const engine = engineRef.current;
     if (!engine) return;
-    engine.setInputEnabled(started && !listOpen && !controlsOpen);
-  }, [started, listOpen, controlsOpen]);
+    engine.setInputEnabled(
+      started && !listOpen && !controlsOpen && !wheelOpen && exhibitIsland === null
+    );
+  }, [started, listOpen, controlsOpen, wheelOpen, exhibitIsland]);
 
   // ---------- gamepad: sambutan saat kontroler dicolok ----------
   useEffect(() => {
@@ -394,21 +538,35 @@ export default function UkiyoWorld() {
     }
   }, [visited, toast]);
 
-  // ---------- tombol pintasan: H (kontrol), Esc (tutup overlay) ----------
+  // ---------- tombol pintasan: H (kontrol), Esc (tutup overlay), Q/1-7 (emote) ----------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
       if (k === "escape") {
-        if (listOpen) setListOpen(false);
+        if (wheelOpen) setWheelOpen(false);
+        else if (exhibitIsland !== null) setExhibitIsland(null);
+        else if (listOpen) setListOpen(false);
         else if (controlsOpen) setControlsOpen(false);
       }
       if (k === "h" && started) {
-        if (!listOpen) setControlsOpen((v) => !v);
+        if (!listOpen && exhibitIsland === null && !wheelOpen) setControlsOpen((v) => !v);
+      }
+      // roda emote terbuka → angka memutar emote, q menutup
+      if (wheelOpen && started) {
+        if (k === "q") {
+          setWheelOpen(false);
+        } else if (/^[1-7]$/.test(k)) {
+          const def = EMOTES[Number(k) - 1];
+          if (def) {
+            engineRef.current?.playEmote(def.id);
+            setWheelOpen(false);
+          }
+        }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [started, listOpen, controlsOpen]);
+  }, [started, listOpen, controlsOpen, wheelOpen, exhibitIsland]);
 
   const handleStart = useCallback(() => {
     const engine = engineRef.current;
@@ -452,6 +610,20 @@ export default function UkiyoWorld() {
 
   const talkPress = useCallback(() => {
     engineRef.current?.tryTalk();
+  }, []);
+
+  const handleEmotePlay = useCallback((id: string) => {
+    engineRef.current?.playEmote(id);
+    setWheelOpen(false);
+  }, []);
+
+  const toggleWheel = useCallback(() => setWheelOpen((v) => !v), []);
+
+  const toggleScarf = useCallback(() => {
+    setScarfOn((v) => {
+      engineRef.current?.setGoldScarf(!v);
+      return !v;
+    });
   }, []);
 
   // ---------- joystick virtual ----------
@@ -553,6 +725,18 @@ export default function UkiyoWorld() {
   const remainingSteps = TUTORIAL_STEPS.filter((s) => !doneActions.has(s.action));
   const showTutorialCard = started && remainingSteps.length > 0;
 
+  /** Proyek & konten pameran yang sedang terbuka (null = tertutup) */
+  const exhibitProject: Project | null =
+    exhibitIsland !== null && exhibitIsland >= 1
+      ? (PROJECTS[exhibitIsland - 1] ?? null)
+      : null;
+  const exhibit = exhibitProject?.showcase ?? null;
+  const exhibitShot = exhibit
+    ? exhibit.gallery[Math.min(galleryIdx, exhibit.gallery.length - 1)]
+    : null;
+  /** jumlah bintang efektif untuk membuka emote (sesi ini atau terbaik sepanjang masa) */
+  const effStars = Math.max(starCount.c, maxStarsSaved);
+
   return (
     <div
       ref={containerRef}
@@ -570,6 +754,16 @@ export default function UkiyoWorld() {
       >
         zyxcid<span className="text-[#E4572E]">.</span>
       </a>
+
+      {/* ================= CHIP NAMA GEDUNG (saat di dalam) ================= */}
+      {insideIsland !== null && (
+        <div className="pointer-events-none absolute left-1/2 top-4 z-20 -translate-x-1/2 sm:top-5">
+          <div className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#F7F2E6]/95 px-3 py-1.5 font-space text-[10.5px] uppercase tracking-wider shadow-[3px_3px_0_#1C1813]">
+            <Landmark className="h-3.5 w-3.5 text-[#E4572E]" aria-hidden />
+            {PROJECTS[insideIsland - 1]?.showcase?.building ?? "gedung proyek"}
+          </div>
+        </div>
+      )}
 
       {/* ================= HUD KANAN-ATAS ================= */}
       <div className="absolute right-3 top-3 z-20 flex flex-col items-end gap-2 sm:right-6 sm:top-5">
@@ -622,6 +816,15 @@ export default function UkiyoWorld() {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={toggleWheel}
+            className="hand grid h-9 w-9 place-items-center border-2 border-[#1C1813] bg-[#F7B32B] shadow-[3px_3px_0_#1C1813] transition-transform hover:bg-[#1C1813] hover:text-[#F2EDE3] active:translate-x-[2px] active:translate-y-[2px] active:shadow-[1px_1px_0_#1C1813]"
+            aria-label="Buka roda emote (Q)"
+            title="Emote — Q"
+          >
+            <Sparkles className="h-4 w-4" aria-hidden />
+          </button>
+          <button
+            type="button"
             onClick={toggleMute}
             className="hand grid h-9 w-9 place-items-center border-2 border-[#1C1813] bg-[#F7F2E6] shadow-[3px_3px_0_#1C1813] transition-transform active:translate-x-[2px] active:translate-y-[2px] active:shadow-[1px_1px_0_#1C1813]"
             aria-label={muted ? "Nyalakan suara" : "Matikan suara"}
@@ -666,15 +869,42 @@ export default function UkiyoWorld() {
         )}
       </div>
 
-      {/* ================= HINT BICARA (desktop, saat dekat NPC) ================= */}
-      {started && !isTouch && nearNpc !== null && !talk && (
-        <div className="pointer-events-none absolute bottom-24 left-1/2 z-20 -translate-x-1/2">
-          <div className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#F7F2E6]/95 px-4 py-1.5 font-space text-[10.5px] uppercase tracking-wider shadow-[3px_3px_0_#1C1813]">
-            <kbd className="hand border-[1.5px] border-[#1C1813] px-1.5 py-0.5 font-space text-[9px]">E</kbd>
-            sapa penghuni
+      {/* ================= HINT INTERAKSI (desktop, saat dekat) ================= */}
+      {started &&
+        !isTouch &&
+        !talk &&
+        !wheelOpen &&
+        (nearDoor !== null || nearNpc !== null || insideNear !== null) && (
+          <div className="pointer-events-none absolute bottom-24 left-1/2 z-20 max-w-[min(34rem,calc(100vw-2rem))] -translate-x-1/2">
+            {insideNear !== null ? (
+              <div className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#E4572E] px-4 py-1.5 font-space text-[10.5px] uppercase tracking-wider text-[#F2EDE3] shadow-[3px_3px_0_#1C1813]">
+                <kbd className="hand border-[1.5px] border-[#F2EDE3] px-1.5 py-0.5 font-space text-[9px]">E</kbd>
+                {insideNear.kind === "exit"
+                  ? "keluar dari gedung"
+                  : insideNear.kind === "pad"
+                    ? "jawab kuis kanji"
+                    : insideNear.kind === "book"
+                      ? "buka buku pamaran"
+                      : "perbesar gambar"}
+                {insideNear.kind === "shot" && insideNear.caption && (
+                  <span className="hidden truncate normal-case tracking-normal opacity-85 sm:inline">
+                    — {insideNear.caption}
+                  </span>
+                )}
+              </div>
+            ) : nearDoor !== null ? (
+              <div className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#E4572E] px-4 py-1.5 font-space text-[10.5px] uppercase tracking-wider text-[#F2EDE3] shadow-[3px_3px_0_#1C1813]">
+                <kbd className="hand border-[1.5px] border-[#F2EDE3] px-1.5 py-0.5 font-space text-[9px]">E</kbd>
+                masuk {(PROJECTS[nearDoor - 1]?.showcase?.building ?? "gedung").toLowerCase()}
+              </div>
+            ) : (
+              <div className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#F7F2E6]/95 px-4 py-1.5 font-space text-[10.5px] uppercase tracking-wider shadow-[3px_3px_0_#1C1813]">
+                <kbd className="hand border-[1.5px] border-[#1C1813] px-1.5 py-0.5 font-space text-[9px]">E</kbd>
+                sapa penghuni
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        )}
 
       {/* ================= PANEL DETAIL PROYEK (geser dari kanan) ================= */}
       <aside
@@ -760,6 +990,20 @@ export default function UkiyoWorld() {
                 buka repo
                 <ExternalLink className="h-3.5 w-3.5 opacity-70" aria-hidden />
               </a>
+              {currentProject.showcase && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    // masuk langsung ke ruangan 3D gedung
+                    engineRef.current?.enterBuilding(projIdx);
+                    setDismissedIsland(projIdx);
+                  }}
+                  className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#F7B32B] px-4 py-2.5 font-space text-[11.5px] uppercase tracking-wider text-[#1C1813] shadow-[3px_3px_0_#1C1813] hover:bg-[#1C1813] hover:text-[#F2EDE3]"
+                >
+                  <Landmark className="h-4 w-4" aria-hidden />
+                  masuk gedung
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setDismissedIsland(projIdx)}
@@ -858,7 +1102,8 @@ export default function UkiyoWorld() {
           >
             <div className="hand whitespace-nowrap border-2 border-[#1C1813] bg-[#F7F2E6]/90 px-4 py-2 font-space text-[10.5px] uppercase tracking-wider text-[#1C1813] shadow-[3px_3px_0_#1C1813]">
               <b className="text-[#E4572E]">H</b> kendali ·{" "}
-              <b className="text-[#E4572E]">E</b> sapa penghuni · kumpulkan
+              <b className="text-[#E4572E]">E</b> sapa/masuk ·{" "}
+              <b className="text-[#E4572E]">Q</b> emote · kumpulkan
               bintangnya
             </div>
           </motion.div>
@@ -973,6 +1218,199 @@ export default function UkiyoWorld() {
         )}
       </AnimatePresence>
 
+      {/* ================= PAMERAN GEDUNG PROYEK (masuk via pintu / tombol panel) ================= */}
+      <AnimatePresence>
+        {exhibit && exhibitProject && exhibitShot && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.25 }}
+            className="fixed inset-0 z-50 overflow-y-auto bg-[#F2EDE3]"
+            role="dialog"
+            aria-label={`Pameran ${exhibitProject.name}`}
+          >
+            <button
+              type="button"
+              onClick={() => setExhibitIsland(null)}
+              className="hand fixed right-4 top-4 z-10 grid h-11 w-11 place-items-center border-2 border-[#1C1813] bg-[#F7F2E6] shadow-[3px_3px_0_#1C1813] hover:bg-[#E4572E] hover:text-[#F2EDE3] sm:right-6 sm:top-5"
+              aria-label="Tutup pameran"
+            >
+              <X className="h-4 w-4" aria-hidden />
+            </button>
+            <div className="mx-auto max-w-[920px] px-5 pb-24 pt-14 sm:px-8 sm:pt-16">
+              {/* ---------- kepala pameran ---------- */}
+              <p className="font-space flex items-center gap-3 text-[11px] uppercase tracking-[2px] text-[#1C1813]/70">
+                <span className="h-[2px] w-9 bg-[#E4572E]" aria-hidden />
+                gedung proyek · pulau {String(exhibitIsland).padStart(2, "0")} —{" "}
+                {exhibit.building}
+              </p>
+              <h2 className="font-dm mt-2 text-[clamp(40px,7vw,72px)] italic leading-[0.95] text-[#1C1813]">
+                {exhibitProject.name}
+              </h2>
+              <p className="mt-3 max-w-[58ch] text-[15px] leading-relaxed text-[#1C1813]/80">
+                {exhibit.tagline}
+              </p>
+
+              {/* ---------- galeri tangkapan layar ---------- */}
+              <section className="mt-9">
+                <div className="hand2 border-[2.5px] border-[#1C1813] bg-[#F7F2E6] p-2.5 shadow-[6px_6px_0_#1C1813]">
+                  <div className="relative flex h-[40vh] items-center justify-center overflow-hidden border-2 border-[#1C1813] bg-[#E9E1CF] sm:h-[52vh]">
+                    <img
+                      src={exhibitShot.src}
+                      alt={exhibitShot.caption}
+                      className="max-h-full max-w-full object-contain"
+                      draggable={false}
+                    />
+                  </div>
+                  <p className="mt-2.5 px-1 pb-0.5 font-space text-[10.5px] uppercase tracking-wider text-[#1C1813]/70">
+                    {exhibitShot.caption} · {Math.min(galleryIdx + 1, exhibit.gallery.length)}/
+                    {exhibit.gallery.length}
+                  </p>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {exhibit.gallery.map((s, i) => (
+                    <button
+                      key={s.src}
+                      type="button"
+                      onClick={() => setGalleryIdx(i)}
+                      className={`hand2 border-[2.5px] p-1 transition-transform hover:-translate-y-0.5 ${
+                        i === galleryIdx
+                          ? "border-[#E4572E] bg-[#E4572E]/15 shadow-[3px_3px_0_#E4572E]"
+                          : "border-[#1C1813] bg-[#F7F2E6] shadow-[3px_3px_0_#1C1813]"
+                      }`}
+                      aria-label={`Lihat: ${s.caption}`}
+                      aria-pressed={i === galleryIdx}
+                    >
+                      <img
+                        src={s.src}
+                        alt=""
+                        className="h-12 w-auto border-[1.5px] border-[#1C1813] sm:h-14"
+                        draggable={false}
+                      />
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              {/* ---------- statistik ---------- */}
+              <section className="mt-11 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+                {exhibit.stats.map((st) => (
+                  <div
+                    key={st.label}
+                    className="hand2 border-2 border-[#1C1813] bg-[#F7F2E6] p-3.5 text-center"
+                  >
+                    <p className="font-dm text-3xl italic leading-none text-[#E4572E] sm:text-4xl">
+                      {st.value}
+                    </p>
+                    <p className="mt-2 font-space text-[9.5px] uppercase tracking-[1px] text-[#1C1813]/60">
+                      {st.label}
+                    </p>
+                  </div>
+                ))}
+              </section>
+
+              {/* ---------- cerita proyek ---------- */}
+              <section className="mt-11">
+                <h3 className="font-space flex items-center gap-3 text-[11px] uppercase tracking-[2px] text-[#1C1813]/70">
+                  <span className="h-[2px] w-9 bg-[#E4572E]" aria-hidden />
+                  tentang proyek
+                </h3>
+                {exhibit.story.map((p, i) => (
+                  <p
+                    key={i}
+                    className="mt-4 max-w-[62ch] text-[15px] leading-[1.75] text-[#1C1813]/85"
+                  >
+                    {p}
+                  </p>
+                ))}
+              </section>
+
+              {/* ---------- fitur ---------- */}
+              <section className="mt-11">
+                <h3 className="font-space flex items-center gap-3 text-[11px] uppercase tracking-[2px] text-[#1C1813]/70">
+                  <span className="h-[2px] w-9 bg-[#E4572E]" aria-hidden />
+                  apa yang ada di dalamnya
+                </h3>
+                <div className="mt-4 grid gap-2.5 sm:grid-cols-2">
+                  {exhibit.features.map((f, i) => {
+                    const Icon = FEATURE_ICONS[i % FEATURE_ICONS.length];
+                    return (
+                      <div
+                        key={f.title}
+                        className="hand2 flex items-start gap-3 border-2 border-[#1C1813] bg-[#F7F2E6] p-3.5"
+                      >
+                        <Icon
+                          className="mt-0.5 h-4 w-4 shrink-0 text-[#E4572E]"
+                          aria-hidden
+                        />
+                        <div>
+                          <p className="text-sm font-bold text-[#1C1813]">
+                            {f.title}
+                          </p>
+                          <p className="mt-1 text-[13px] leading-relaxed text-[#1C1813]/70">
+                            {f.desc}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+
+              {/* ---------- bahan pembuat ---------- */}
+              <section className="mt-11">
+                <h3 className="font-space flex items-center gap-3 text-[11px] uppercase tracking-[2px] text-[#1C1813]/70">
+                  <span className="h-[2px] w-9 bg-[#E4572E]" aria-hidden />
+                  bahan pembuat
+                </h3>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {exhibit.stack.map((s) => (
+                    <span
+                      key={s}
+                      className="hand border-[1.5px] border-[#1C1813] bg-[#E9E1CF] px-2.5 py-1.5 font-space text-[10px] tracking-wider text-[#1C1813]"
+                    >
+                      {s}
+                    </span>
+                  ))}
+                </div>
+              </section>
+
+              {/* ---------- kredit data ---------- */}
+              {exhibit.credit && (
+                <p className="mt-9 max-w-[62ch] border-t-2 border-[#1C1813]/15 pt-5 text-[12.5px] leading-relaxed text-[#1C1813]/55">
+                  {exhibit.credit}
+                </p>
+              )}
+
+              {/* ---------- aksi ---------- */}
+              <div className="mt-7 flex flex-wrap gap-2.5">
+                <a
+                  href={exhibitProject.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#E4572E] px-4 py-2.5 font-space text-[11.5px] uppercase tracking-wider text-[#F2EDE3] shadow-[3px_3px_0_#1C1813] hover:bg-[#1C1813]"
+                >
+                  <Github className="h-4 w-4" aria-hidden />
+                  buka repo
+                  <ExternalLink className="h-3.5 w-3.5 opacity-70" aria-hidden />
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setExhibitIsland(null)}
+                  className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#F7F2E6] px-4 py-2.5 font-space text-[11.5px] uppercase tracking-wider text-[#1C1813] shadow-[3px_3px_0_#1C1813] hover:bg-[#1C1813] hover:text-[#F2EDE3]"
+                >
+                  kembali ke permainan
+                </button>
+              </div>
+              <p className="mt-6 font-space text-[10.5px] uppercase tracking-wider text-[#1C1813]/50">
+                esc — kembali ke permainan
+              </p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* ================= KARTU KENDALI (tombol H) ================= */}
       <AnimatePresence>
         {controlsOpen && (
@@ -1039,6 +1477,18 @@ export default function UkiyoWorld() {
                     val: isTouch ? "tombol sapa (muncul dekat penghuni)" : "E — dekat penghuni",
                   },
                   {
+                    icon: Landmark,
+                    label: "masuk gedung",
+                    val: isTouch ? "tombol masuk, di depan pintu" : "E — di depan pintu gedung",
+                  },
+                  {
+                    icon: Sparkles,
+                    label: "emote",
+                    val: isTouch
+                      ? "tombol emote di kiri bawah"
+                      : "Q buka roda · 1–7 langsung",
+                  },
+                  {
                     icon: List,
                     label: "daftar pulau",
                     val: isTouch ? "tombol pulau di kanan atas" : "tombol pulau / kanan atas",
@@ -1059,6 +1509,7 @@ export default function UkiyoWorld() {
                 <p className="text-xs leading-relaxed">
                   <b>Kontroler gamepad?</b> Tinggal colok — stik kiri bergerak,
                   <b> A</b> lompat, <b>B / X</b> dash, <b>Y</b> sapa penghuni,
+                  <b> LB</b> emote berikutnya, <b>RB</b> roda emote,
                   <b> Start</b> daftar pulau, stik kanan kamera. Getaran halus ikut
                   aktif dan ikut mati bersama tombol suara.
                 </p>
@@ -1076,7 +1527,8 @@ export default function UkiyoWorld() {
               </div>
               <p className="mt-4 font-space text-[10px] uppercase tracking-wider text-[#1C1813]/50">
                 tekan <b className="text-[#E4572E]">H</b> kapan saja untuk membuka
-                kartu ini · tahan spasi saat jatuh untuk melayang pelan
+                kartu ini · <b className="text-[#E4572E]">Q</b> untuk emote · tahan
+                spasi saat jatuh untuk melayang pelan
               </p>
             </motion.div>
           </motion.div>
@@ -1101,10 +1553,75 @@ export default function UkiyoWorld() {
               style={{ transform: "translate(-50%, -50%)" }}
             />
           </div>
+          <button
+            type="button"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              toggleWheel();
+            }}
+            className="hand absolute bottom-44 left-6 z-30 grid h-14 w-14 place-items-center border-2 border-[#1C1813] bg-[#F7B32B] shadow-[3px_3px_0_#1C1813] active:translate-x-[2px] active:translate-y-[2px] active:shadow-[1px_1px_0_#1C1813]"
+            style={{ touchAction: "none" }}
+            aria-label="Buka roda emote"
+          >
+            <Sparkles className="h-6 w-6" aria-hidden />
+          </button>
           <div className="absolute bottom-8 right-6 z-30 flex flex-col items-end gap-3">
-            <AnimatePresence>
-              {nearNpc !== null && (
+            <AnimatePresence mode="wait">
+              {insideNear !== null ? (
                 <motion.button
+                  key="aksi-dalam"
+                  initial={{ opacity: 0, scale: 0.8, y: 8 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.8, y: 8 }}
+                  type="button"
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    talkPress();
+                  }}
+                  className="hand flex h-14 items-center gap-2 border-2 border-[#1C1813] bg-[#E4572E] px-4 font-space text-[11px] uppercase tracking-wider text-[#F2EDE3] shadow-[3px_3px_0_#1C1813] active:translate-x-[2px] active:translate-y-[2px] active:shadow-[1px_1px_0_#1C1813]"
+                  style={{ touchAction: "none" }}
+                  aria-label={
+                    insideNear.kind === "exit"
+                      ? "Keluar dari gedung"
+                      : insideNear.kind === "pad"
+                        ? "Jawab kuis kanji"
+                        : "Lihat pameran"
+                  }
+                >
+                  {insideNear.kind === "exit" ? (
+                    <DoorOpen className="h-5 w-5" aria-hidden />
+                  ) : insideNear.kind === "pad" ? (
+                    <ListChecks className="h-5 w-5" aria-hidden />
+                  ) : (
+                    <BookOpen className="h-5 w-5" aria-hidden />
+                  )}
+                  {insideNear.kind === "exit"
+                    ? "keluar"
+                    : insideNear.kind === "pad"
+                      ? "jawab"
+                      : "lihat"}
+                </motion.button>
+              ) : nearDoor !== null ? (
+                <motion.button
+                  key="masuk"
+                  initial={{ opacity: 0, scale: 0.8, y: 8 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.8, y: 8 }}
+                  type="button"
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    talkPress();
+                  }}
+                  className="hand flex h-14 items-center gap-2 border-2 border-[#1C1813] bg-[#E4572E] px-4 font-space text-[11px] uppercase tracking-wider text-[#F2EDE3] shadow-[3px_3px_0_#1C1813] active:translate-x-[2px] active:translate-y-[2px] active:shadow-[1px_1px_0_#1C1813]"
+                  style={{ touchAction: "none" }}
+                  aria-label="Masuk gedung proyek"
+                >
+                  <DoorOpen className="h-5 w-5" aria-hidden />
+                  masuk
+                </motion.button>
+              ) : nearNpc !== null ? (
+                <motion.button
+                  key="sapa"
                   initial={{ opacity: 0, scale: 0.8, y: 8 }}
                   animate={{ opacity: 1, scale: 1, y: 0 }}
                   exit={{ opacity: 0, scale: 0.8, y: 8 }}
@@ -1120,7 +1637,7 @@ export default function UkiyoWorld() {
                   <MessageCircle className="h-5 w-5" aria-hidden />
                   sapa
                 </motion.button>
-              )}
+              ) : null}
             </AnimatePresence>
             <div className="flex items-end gap-3">
               <button
@@ -1154,6 +1671,96 @@ export default function UkiyoWorld() {
           </div>
         </>
       )}
+
+      {/* ================= RODA EMOTE (Q / tombol percik) ================= */}
+      <AnimatePresence>
+        {wheelOpen && started && (
+          <motion.div
+            initial={{ opacity: 0, y: 24, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 24, scale: 0.96 }}
+            transition={{ type: "spring", stiffness: 320, damping: 28 }}
+            className="absolute bottom-6 left-1/2 z-40 w-[min(30rem,calc(100vw-2rem))] -translate-x-1/2"
+            role="dialog"
+            aria-label="Roda emote"
+          >
+            <div className="hand2 border-[2.5px] border-[#1C1813] bg-[#F7F2E6]/97 p-4 shadow-[6px_6px_0_#1C1813] backdrop-blur-sm">
+              <div className="flex items-center justify-between gap-3">
+                <p className="font-space text-[10px] uppercase tracking-[2px] text-[#1C1813]/60">
+                  emote · {effStars}/{starCount.total} bintang
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setWheelOpen(false)}
+                  className="hand grid h-8 w-8 place-items-center border-2 border-[#1C1813] hover:bg-[#E4572E] hover:text-[#F2EDE3]"
+                  aria-label="Tutup roda emote"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden />
+                </button>
+              </div>
+              <div className="mt-3 grid grid-cols-4 gap-2">
+                {EMOTES.map((def, i) => {
+                  const unlocked = emoteUnlocked(def, effStars, starCount.total);
+                  const need = unlockStars(def, starCount.total);
+                  const Icon = EMOTE_ICONS[def.id] ?? Sparkles;
+                  return (
+                    <button
+                      key={def.id}
+                      type="button"
+                      onClick={() => handleEmotePlay(def.id)}
+                      aria-label={
+                        unlocked
+                          ? `Mainkan emote ${def.label}`
+                          : `Terkunci — butuh ${need} bintang`
+                      }
+                      className={`hand2 flex flex-col items-center gap-1 border-2 border-[#1C1813] px-1.5 pb-2.5 pt-2 transition-transform hover:-translate-y-0.5 ${
+                        unlocked ? "bg-[#F2EDE3]" : "bg-[#E9E1CF] opacity-55"
+                      }`}
+                    >
+                      {unlocked ? (
+                        <Icon className="h-5 w-5 text-[#E4572E]" aria-hidden />
+                      ) : (
+                        <Lock className="h-4 w-4 text-[#1C1813]/60" aria-hidden />
+                      )}
+                      <span className="font-space text-[9px] uppercase leading-none tracking-wider text-[#1C1813]">
+                        {def.label}
+                      </span>
+                      <span className="font-space text-[8px] leading-none tabular-nums text-[#1C1813]/55">
+                        {unlocked ? i + 1 : `${need}★`}
+                      </span>
+                    </button>
+                  );
+                })}
+                {scarfUnlocked && (
+                  <button
+                    type="button"
+                    onClick={toggleScarf}
+                    aria-pressed={scarfOn}
+                    aria-label="Syal emas — hadiah semua bintang"
+                    className={`hand2 flex flex-col items-center gap-1 border-2 border-[#1C1813] px-1.5 pb-2.5 pt-2 transition-transform hover:-translate-y-0.5 ${
+                      scarfOn ? "bg-[#F7B32B]" : "bg-[#F2EDE3]"
+                    }`}
+                  >
+                    <Crown className="h-5 w-5 text-[#E4572E]" aria-hidden />
+                    <span className="font-space text-[9px] uppercase leading-none tracking-wider text-[#1C1813]">
+                      syal emas
+                    </span>
+                    <span className="font-space text-[8px] leading-none text-[#1C1813]/55">
+                      {scarfOn ? "dipakai" : "lepas"}
+                    </span>
+                  </button>
+                )}
+              </div>
+              <p className="mt-2.5 font-space text-[9.5px] uppercase tracking-wider text-[#1C1813]/50">
+                {isTouch
+                  ? "ketuk untuk bermain"
+                  : "ketuk atau tekan 1–7 · esc menutup"}{" "}
+                · tamu lain juga melihat emotemu
+              </p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ================= INTRO OVERLAY ================= */}
       <AnimatePresence>

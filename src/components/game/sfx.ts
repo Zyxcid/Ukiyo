@@ -121,6 +121,11 @@ export class Sfx {
     this.tone(base, 0.09, "triangle", 0.055);
     this.tone(base * 1.5, 0.13, "triangle", 0.045, undefined, 0.05);
   }
+  /** emote: dua blip riang */
+  emote() {
+    this.tone(600, 0.09, "square", 0.04, 760);
+    this.tone(880, 0.12, "square", 0.04, 1040, 0.07);
+  }
   milestone() {
     const notes = [523, 659, 784, 1047];
     notes.forEach((f, i) => this.tone(f, 0.16, "triangle", 0.05, undefined, i * 0.09));

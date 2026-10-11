@@ -21,6 +21,27 @@ export interface EngineCallbacks {
   onAction: (action: PlayerAction) => void;
   /** Dipanggil saat NPC terdekat berubah (untuk tombol BICARA di sentuh) */
   onNpcNear: (islandIndex: number | null) => void;
+  /** Dipanggil saat gedung proyek terdekat berubah (hint masuk / null saat menjauh) */
+  onDoorNear?: (islandIndex: number | null) => void;
+  /** Pemain masuk (index) / keluar (null) dari ruangan 3D gedung proyek */
+  onBuildingInside?: (islandIndex: number | null) => void;
+  /** Interaksi terdekat DI DALAM gedung berubah (null = tidak dekat apa pun) */
+  onInsideNear?: (near: {
+    kind: "exit" | "shot" | "book" | "pad";
+    caption?: string;
+    galleryIdx?: number;
+  } | null) => void;
+  /** Hasil jawaban kuis kanji di dalam gedung */
+  onQuizResult?: (correct: boolean, streak: number) => void;
+  /** Pemain membuka buku pamaran / mengklik tangkapan layar di dalam gedung
+   *  (membuka overlay pameran; galleryIdx memilih gambar awal) */
+  onEnterBuilding?: (islandIndex: number, galleryIdx?: number) => void;
+  /** Emote dipanggil tapi masih terkunci */
+  onEmoteBlocked?: (emoteId: string, needStars: number) => void;
+  /** Emote baru terbuka — persis saat ambang bintang tercapai */
+  onEmoteUnlocked?: (emoteId: string) => void;
+  /** Syal emas terbuka (semua bintang terkumpul) */
+  onScarfUnlock?: () => void;
   /** Dipanggil saat pemain menyapa NPC — null saat bubble selesai */
   onTalk: (info: { islandIndex: number; quote: string } | null) => void;
   /** Dipanggil saat bintang terkumpul */

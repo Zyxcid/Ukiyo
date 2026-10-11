@@ -20,6 +20,12 @@ export interface CharacterHandle {
   onLand: () => void;
   /** front-flip 360 saat double jump */
   onDoubleJump: () => void;
+  /** mainkan emote (id dari emotes.ts) — animasi prosedural */
+  playEmote: (id: string, dur: number) => void;
+  /** sisa waktu emote yang sedang bermain (0 = tidak ada) */
+  emoteLeft: () => number;
+  /** syal emas — hadiah semua bintang terkumpul */
+  setScarfGold: (on: boolean) => void;
   dispose: () => void;
 }
 
@@ -120,7 +126,8 @@ export function createPaperBird(scene: THREE.Scene): CharacterHandle {
 
   // ---- syal kecil warna aksen (biar semangat) ----
   const scarfGeo = new THREE.TorusGeometry(0.22, 0.05, 8, 16);
-  const scarf = new THREE.Mesh(scarfGeo, toon(PALETTE.accent));
+  const scarfMat = toon(PALETTE.accent);
+  const scarf = new THREE.Mesh(scarfGeo, scarfMat);
   scarf.rotation.x = Math.PI / 2;
   scarf.position.y = 0.42;
   flipGroup.add(scarf);
@@ -150,6 +157,11 @@ export function createPaperBird(scene: THREE.Scene): CharacterHandle {
   let blinkT = -1;
   let smoothYaw = 0;
   let flipT = 0; // sisa waktu flip
+
+  // state emote
+  let emoteId: string | null = null;
+  let emoteT = 0;
+  let emoteDur = 1;
 
   return {
     group,
@@ -229,12 +241,100 @@ export function createPaperBird(scene: THREE.Scene): CharacterHandle {
         for (const e of eyes) e.scale.y = s;
         if (p >= 1) blinkT = -1;
       }
+
+      // --- EMOTE (menimpa sebagian pose di atasnya) ---
+      const prevEmote = emoteT;
+      if (emoteT > 0) emoteT = Math.max(0, emoteT - dt);
+      if (emoteId && prevEmote > 0 && emoteT <= 0) {
+        // emote barus saja selesai — pulihkan pose yang tidak di-lerp otomatis
+        emoteId = null;
+        body.position.x = 0;
+        flipGroup.rotation.y = 0;
+        for (const e of eyes) e.scale.y = 1;
+        legL.rotation.x = 0;
+        legR.rotation.x = 0;
+      }
+      if (emoteId && emoteT > 0) {
+        const p = 1 - emoteT / emoteDur; // progres 0..1
+        switch (emoteId) {
+          case "wave": {
+            // dua sayap terangkat, mengibas bergantian
+            const wig = Math.sin(t * 9) * 0.28;
+            wingL.rotation.z = -(1.15 + wig);
+            wingR.rotation.z = 1.15 - wig;
+            body.rotation.z = Math.sin(t * 4.5) * 0.08;
+            break;
+          }
+          case "dance": {
+            body.position.x = Math.sin(t * 6.3) * 0.1;
+            body.position.y = 0.52 + Math.abs(Math.sin(t * 6.3)) * 0.07;
+            wingL.rotation.z = -(0.5 + Math.sin(t * 12) * 0.6);
+            wingR.rotation.z = 0.5 + Math.sin(t * 12 + Math.PI) * 0.6;
+            legL.rotation.x = Math.sin(t * 12) * 0.55;
+            legR.rotation.x = -Math.sin(t * 12) * 0.55;
+            ahoge.rotation.z = -0.28 + Math.sin(t * 12) * 0.4;
+            break;
+          }
+          case "spin": {
+            flipGroup.rotation.y = p * Math.PI * 4; // dua putaran penuh
+            wingL.rotation.z = -1.0;
+            wingR.rotation.z = 1.0;
+            break;
+          }
+          case "flip": {
+            flipGroup.rotation.x = p * Math.PI * 4; // salto ganda
+            break;
+          }
+          case "sit": {
+            body.position.y = 0.34;
+            body.scale.set(
+              bodyScale.x * 1.12,
+              bodyScale.y * 0.74,
+              bodyScale.z * 1.12
+            );
+            legL.rotation.x = 1.25;
+            legR.rotation.x = 1.25;
+            wingL.rotation.z = -0.55;
+            wingR.rotation.z = 0.55;
+            for (const e of eyes) e.scale.y = 0.1; // merem santai
+            ahoge.rotation.z = -0.05 + Math.sin(t * 1.6) * 0.06;
+            break;
+          }
+          case "hearts": {
+            body.position.y = 0.52 + Math.abs(Math.sin(t * 3.6)) * 0.16;
+            wingL.rotation.z = -(0.4 + Math.sin(t * 7) * 0.35);
+            wingR.rotation.z = 0.4 + Math.sin(t * 7) * 0.35;
+            body.rotation.z = Math.sin(t * 3.6) * 0.12;
+            break;
+          }
+          case "glitter": {
+            flipGroup.rotation.y = p * Math.PI * 6;
+            wingL.rotation.z = -1.3;
+            wingR.rotation.z = 1.3;
+            body.position.y = 0.52 + Math.abs(Math.sin(t * 10)) * 0.1;
+            break;
+          }
+        }
+      }
     },
     onLand() {
       squash = 1;
     },
     onDoubleJump() {
       flipT = 0.5;
+    },
+    playEmote(id: string, dur: number) {
+      if (emoteId && emoteT > 0) return; // satu emote dalam satu waktu
+      emoteId = id;
+      emoteDur = Math.max(0.4, dur);
+      emoteT = emoteDur;
+      flipGroup.rotation.y = 0;
+    },
+    emoteLeft() {
+      return emoteT;
+    },
+    setScarfGold(on: boolean) {
+      scarfMat.color.set(on ? 0xf7b32b : PALETTE.accent);
     },
     dispose() {
       scene.remove(group, shadow);

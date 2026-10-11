@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { PALETTE, PLAYFUL } from "./types";
+import { emoteIconTexture } from "./emotes";
 import type { PartySocket } from "partysocket";
 
 /**
@@ -21,7 +22,7 @@ const SEND_INTERVAL = 0.11; // detik antar kirim posisi (~9 Hz)
 const GHOST_TIMEOUT_MS = 8000; // tamu dianggap pergi bila senyap selama ini
 const GHOST_CAP = 12; // maksimal hantu yang digambar (sisanya hanya dihitung)
 const LERP_K = 10; // kecepatan interpolasi posisi hantu
-const RECV_SAFE = { XY: 400, Y_MIN: -80, Y_MAX: 400 }; // jangkauan wajar posisi
+const RECV_SAFE = { XY: 400, Y_MIN: -140, Y_MAX: 400 }; // jangkauan wajar posisi (termasuk interior y=-70)
 
 /** 0 = di tanah · 1 = di udara · 2 = melayang (glide) · 3 = dash */
 export type AirState = 0 | 1 | 2 | 3;
@@ -64,6 +65,10 @@ interface Ghost {
   s: AirState;
   phase: number;
   lastSeen: number;
+  // emote yang sedang dimainkan tamu ini
+  emoteId: string | null;
+  emoteT: number;
+  emoteIcon: THREE.Sprite | null;
   /** bebaskan geometri/material/mesh hantu ini */
   dispose: () => void;
 }
@@ -233,6 +238,18 @@ export class Multiplayer {
       this.removeGhost(id);
       return;
     }
+
+    // ---- emote tamu lain ----
+    if (t === "e") {
+      const g = this.ghosts.get(id);
+      if (g) {
+        const emoteId =
+          typeof d.e === "string" ? d.e.replace(/[^a-z]/g, "").slice(0, 12) : "";
+        if (emoteId) this.playGhostEmote(g, emoteId);
+      }
+      return;
+    }
+
     if (t !== "p") return;
 
     const now = performance.now();
@@ -347,7 +364,7 @@ export class Multiplayer {
     bird.rotation.y = yaw;
     this.scene.add(bird);
 
-    this.ghosts.set(id, {
+    const ghost: Ghost = {
       id,
       bird,
       tag,
@@ -365,14 +382,41 @@ export class Multiplayer {
       s: (Math.round(fin(d.s, 0, 3)) | 0) as AirState,
       phase: Math.random() * 6,
       lastSeen: performance.now(),
+      emoteId: null,
+      emoteT: 0,
+      emoteIcon: null,
       dispose: () => {
         this.scene?.remove(bird);
         (tag.material.map as THREE.Texture | null)?.dispose();
         tag.material.dispose();
+        if (ghost.emoteIcon) {
+          ghost.emoteIcon.material.dispose(); // tekstur ikon di-cache global — jangan dispose
+        }
         for (const dp of disposables) dp.dispose();
       },
-    });
+    };
+    this.ghosts.set(id, ghost);
     this.emitPresence();
+  }
+
+  /** Tamu lain memutar emote → animasikan burung hantunya + ikon di atas kepala */
+  private playGhostEmote(g: Ghost, emoteId: string) {
+    g.emoteId = emoteId;
+    g.emoteT = 2.2;
+    if (!g.emoteIcon && this.scene) {
+      const mat = new THREE.SpriteMaterial({ transparent: true, depthWrite: false });
+      g.emoteIcon = new THREE.Sprite(mat);
+      g.emoteIcon.scale.set(0.55, 0.55, 1);
+      g.emoteIcon.renderOrder = 5;
+      g.bird.add(g.emoteIcon);
+    }
+    if (g.emoteIcon) {
+      const mat = g.emoteIcon.material as THREE.SpriteMaterial;
+      mat.map = emoteIconTexture(emoteId);
+      mat.needsUpdate = true;
+      g.emoteIcon.position.set(0, 1.95, 0);
+      g.emoteIcon.visible = true;
+    }
   }
 
   private removeGhost(id: string) {
@@ -448,6 +492,34 @@ export class Multiplayer {
       g.body.position.y = 0.52 + (g.m > 0.15 ? Math.abs(Math.sin(g.phase)) * 0.05 : 0);
       // label ikut mengambang lembut
       g.tag.position.y = 1.52 + Math.sin(now * 0.002 + g.phase) * 0.03;
+
+      // ---- emote hantu: ikon + animasi ringan ----
+      if (g.emoteT > 0) {
+        g.emoteT -= dt;
+        if (g.emoteIcon) {
+          g.emoteIcon.position.y = 1.95 + Math.sin(now * 0.003) * 0.07;
+          if (g.emoteT <= 0) g.emoteIcon.visible = false;
+        }
+        if (g.emoteId === "spin" || g.emoteId === "glitter") {
+          g.bird.rotation.y += dt * 11; // burung berputar (yaw di-set ulang tiap frame)
+        } else if (g.emoteId === "dance") {
+          g.body.position.x = Math.sin(now * 0.006) * 0.1;
+          g.wingL.rotation.z = -(0.5 + Math.sin(now * 0.012) * 0.6);
+          g.wingR.rotation.z = 0.5 + Math.sin(now * 0.012 + Math.PI) * 0.6;
+        } else if (g.emoteId === "hearts") {
+          g.body.position.y = 0.52 + Math.abs(Math.sin(now * 0.004)) * 0.16;
+        } else if (g.emoteId === "sit") {
+          g.body.position.y = 0.36;
+          g.legL.rotation.x = 1.2;
+          g.legR.rotation.x = 1.2;
+        } else if (g.emoteId === "wave") {
+          g.wingL.rotation.z = -(1.15 + Math.sin(now * 0.009) * 0.3);
+          g.wingR.rotation.z = 1.15 - Math.sin(now * 0.009) * 0.3;
+        }
+      } else {
+        // pulihkan pose yang pernah diubah emote (badan bergeser goyang dansa)
+        g.body.position.x *= Math.max(0, 1 - 6 * dt);
+      }
     }
   }
 
@@ -468,6 +540,21 @@ export class Multiplayer {
       this.socket?.send(msg);
     } catch {
       // koneksi sedang drop — reconnect ditangani partysocket
+    }
+  }
+
+  /** Broadcast emote ke tamu lain (satu pesan, sekali jalan) */
+  sendEmote(emoteId: string) {
+    if (!this.connected || !this.socket) return;
+    const msg = JSON.stringify({
+      t: "e",
+      id: this.myId,
+      e: emoteId.replace(/[^a-z]/g, "").slice(0, 12),
+    });
+    try {
+      this.socket.send(msg);
+    } catch {
+      /* diam saja */
     }
   }
 

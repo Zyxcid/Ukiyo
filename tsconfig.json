@@ -38,6 +38,10 @@
   ],
   "exclude": [
     "node_modules",
-    "party"
+    "party",
+    "examples",
+    "scripts",
+    "skills",
+    "tests"
   ]
 }

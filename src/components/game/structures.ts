@@ -24,6 +24,9 @@ export interface Diorama {
   group: THREE.Group;
   /** animasi tambahan per frame (t detik) */
   update?: (t: number) => void;
+  /** Titik pintu gedung (bila diorama punya bangunan masuk-able) —
+   *  dipakai engine untuk deteksi kedekatan pemain. */
+  door?: THREE.Object3D;
 }
 
 type Toon = (color: number) => THREE.MeshToonMaterial;
@@ -139,57 +142,337 @@ function buildScooter(ctx: DioramaContext): Diorama {
   return { group: g };
 }
 
-// ================= 2. KANJICHO-DATA — torii + kristal data =================
-function buildTorii(ctx: DioramaContext): Diorama {
-  const { toon } = ctx;
+// ================= 2. KANJICHŌ — Kanji Hall (perpustakaan kanji masuk-able) =================
+
+/** Font CJK untuk tekstur kanvas: Noto Sans SC (Linux), Gothic Jepang (Win/Mac) */
+const CJK_FONT =
+  "'Noto Sans SC', 'MS Gothic', 'Yu Gothic', 'Hiragino Kaku Gothic Pro', sans-serif";
+
+/** Papan nama dengan kanji (plakat di atas pintu) */
+function kanjiPlaqueTexture(chars: string) {
+  const cv = document.createElement("canvas");
+  cv.width = 256;
+  cv.height = 128;
+  const g = cv.getContext("2d")!;
+  g.fillStyle = "#F7F2E6";
+  g.fillRect(0, 0, 256, 128);
+  g.strokeStyle = "#1C1813";
+  g.lineWidth = 11;
+  g.strokeRect(5, 5, 246, 118);
+  g.lineWidth = 3;
+  g.strokeRect(19, 19, 218, 90);
+  g.fillStyle = "#E4572E";
+  g.fillRect(28, 28, 10, 72);
+  g.fillStyle = "#1C1813";
+  g.font = `700 62px ${CJK_FONT}`;
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  g.fillText(chars, 140, 66);
+  return new THREE.CanvasTexture(cv);
+}
+
+/** Kartu roh kanji kecil (sprite melayang) */
+function kanjiCardTexture(ch: string) {
+  const cv = document.createElement("canvas");
+  cv.width = 128;
+  cv.height = 128;
+  const g = cv.getContext("2d")!;
+  g.fillStyle = "#F7F2E6";
+  g.beginPath();
+  g.roundRect(10, 10, 108, 108, 18);
+  g.fill();
+  g.lineWidth = 7;
+  g.strokeStyle = "#1C1813";
+  g.stroke();
+  g.fillStyle = "#1C1813";
+  g.font = `700 78px ${CJK_FONT}`;
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  g.fillText(ch, 64, 68);
+  return new THREE.CanvasTexture(cv);
+}
+
+function buildKanjiHall(ctx: DioramaContext): Diorama {
+  const { toon, accent, disposables } = ctx;
   const g = new THREE.Group();
   const coral = toon(PLAYFUL.coral);
   const ink = toon(0x1c1813);
+  const cream = toon(PLAYFUL.cream);
+  const stone = toon(0xbfae97);
+  const wood = toon(0x8a7a5e);
   const gold = toon(PLAYFUL.lemon);
 
-  for (const x of [-0.85, 0.85]) {
-    const pillar = box(0.18, 2.3, 0.18, coral, true);
-    pillar.position.set(x, 1.15, 0);
+  const lampGlowMat = new THREE.MeshBasicMaterial({ color: 0xffd98a });
+  disposables.push(lampGlowMat);
+
+  // ---- fondasi: platform batu + dua undakan ----
+  const platform = box(3.9, 0.44, 3.2, stone, true);
+  platform.position.set(0, 0.22, -0.2);
+  g.add(platform);
+  const step1 = box(2.7, 0.16, 0.55, stone, true);
+  step1.position.set(0, 0.08, 1.62);
+  g.add(step1);
+  const step2 = box(2.2, 0.16, 0.5, stone, true);
+  step2.position.set(0, 0.32, 1.3);
+  g.add(step2);
+
+  // ---- dinding (belakang + samping; depan terbuka) ----
+  const back = box(3.5, 2.35, 0.18, cream, true);
+  back.position.set(0, 1.6, -1.28);
+  g.add(back);
+  for (const x of [-1.66, 1.66]) {
+    const wall = box(0.18, 2.35, 2.0, cream, true);
+    wall.position.set(x, 1.6, -0.28);
+    g.add(wall);
+  }
+  // interior gelap + lantai gelap (terlihat lewat bukaan pintu)
+  const darkRoom = box(3.0, 2.0, 1.9, ink);
+  darkRoom.position.set(0, 1.44, -0.3);
+  g.add(darkRoom);
+  const darkFloor = box(3.0, 0.06, 1.9, ink);
+  darkFloor.position.set(0, 0.47, -0.3);
+  g.add(darkFloor);
+  // "rak gulungan" hangat di dalam (tersembunyi di kegelapan, muncul saat dekat)
+  for (const [x, y] of [
+    [-0.9, 1.1],
+    [0, 1.35],
+    [0.9, 1.0],
+  ]) {
+    const scroll = cyl(0.09, 0.09, 1.0, 8, gold);
+    scroll.rotation.z = Math.PI / 2;
+    scroll.position.set(x, y, -0.9);
+    g.add(scroll);
+  }
+  const roomLight = new THREE.PointLight(0xffd98a, 0.85, 7, 1.6);
+  roomLight.position.set(0, 1.9, -0.35);
+  g.add(roomLight);
+  // tumpahan cahaya hangat di undakan depan
+  const spillMat = new THREE.MeshBasicMaterial({
+    color: 0xffd98a,
+    transparent: true,
+    opacity: 0.3,
+    depthWrite: false,
+  });
+  disposables.push(spillMat);
+  const spill = new THREE.Mesh(new THREE.PlaneGeometry(2.5, 1.5), spillMat);
+  spill.rotation.x = -Math.PI / 2;
+  spill.position.set(0, 0.455, 0.85);
+  g.add(spill);
+  disposables.push(spill.geometry);
+
+  // ---- empat pilar merah + palang atas ----
+  for (const [x, z] of [
+    [-1.55, -1.1],
+    [1.55, -1.1],
+    [-1.55, 0.55],
+    [1.55, 0.55],
+  ]) {
+    const pillar = box(0.26, 2.56, 0.26, coral, true);
+    pillar.position.set(x, 1.72, z);
     g.add(pillar);
   }
-  const topBeam = box(2.4, 0.24, 0.32, ink, true);
-  topBeam.position.y = 2.45;
-  g.add(topBeam);
-  const midBeam = box(2.0, 0.15, 0.22, coral);
-  midBeam.position.y = 1.9;
-  g.add(midBeam);
-  for (const x of [-1.05, 1.05]) {
-    const cap = box(0.22, 0.16, 0.36, gold);
-    cap.position.set(x, 2.62, 0);
+  const lintel = box(3.6, 0.24, 0.28, wood, true);
+  lintel.position.set(0, 2.78, 0.55);
+  g.add(lintel);
+  const header = box(3.5, 0.3, 0.2, cream, true);
+  header.position.set(0, 2.6, 0.42);
+  g.add(header);
+
+  // ---- pintu gelap (bukaan) ----
+  const doorway = box(2.5, 1.9, 0.14, ink);
+  doorway.position.set(0, 1.44, 0.4);
+  g.add(doorway);
+
+  // ---- atap bertumpuk dua + bubungan emas ----
+  const roof1 = box(4.5, 0.26, 3.8, ink, true);
+  roof1.position.set(0, 3.02, -0.2);
+  g.add(roof1);
+  const roof2 = box(3.2, 0.22, 2.8, ink, true);
+  roof2.position.set(0, 3.32, -0.25);
+  g.add(roof2);
+  const ridge = box(3.3, 0.2, 0.34, gold, true);
+  ridge.position.set(0, 3.5, -0.25);
+  g.add(ridge);
+  for (const [x, z] of [
+    [-2.18, 1.6],
+    [2.18, 1.6],
+    [-2.18, -2.0],
+    [2.18, -2.0],
+  ]) {
+    const cap = box(0.3, 0.22, 0.3, gold);
+    cap.position.set(x, 3.16, z);
     g.add(cap);
   }
 
-  // kristal data (berputar)
-  const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.55, 0), toon(0xbfae97));
-  rock.position.set(0, 0.4, 1.1);
-  g.add(rock);
-  const crystals: THREE.Mesh[] = [];
-  const crystalMat = toon(PLAYFUL.lavender);
-  const spec: Array<[number, number, number, number]> = [
-    [0, 1.2, 1.1, 0.42],
-    [0.42, 0.85, 1.35, 0.28],
-    [-0.4, 0.75, 0.85, 0.24],
+  // ---- plakat 漢字帳 bergantung di atas pintu ----
+  const plaqueTex = kanjiPlaqueTexture("漢字帳");
+  disposables.push(plaqueTex);
+  const plaqueMats = [
+    wood,
+    wood,
+    wood,
+    wood,
+    new THREE.MeshToonMaterial({ map: plaqueTex }),
+    new THREE.MeshToonMaterial({ map: plaqueTex }),
   ];
-  for (const [x, y, z, r] of spec) {
-    const c = new THREE.Mesh(new THREE.OctahedronGeometry(r, 0), crystalMat);
-    withOutline(c, 1.1);
-    c.position.set(x, y, z);
-    g.add(c);
-    crystals.push(c);
+  disposables.push(...plaqueMats.slice(4));
+  const plaquePivot = new THREE.Group();
+  plaquePivot.position.set(0, 2.62, 0.52);
+  const plaque = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.62, 0.09), plaqueMats);
+  const plaqueSh = new THREE.Mesh(plaque.geometry, OUTLINE_MAT);
+  plaqueSh.scale.setScalar(1.05);
+  plaque.add(plaqueSh);
+  plaque.position.y = -0.42;
+  plaquePivot.add(plaque);
+  for (const x of [-0.5, 0.5]) {
+    const string = cyl(0.014, 0.014, 0.42, 5, ink);
+    string.position.set(x, -0.18, 0);
+    plaquePivot.add(string);
   }
+  g.add(plaquePivot);
+
+  // ---- dua lampion kertas di kiri-kanan pintu ----
+  const lanterns: THREE.Group[] = [];
+  for (const x of [-1.05, 1.05]) {
+    const pivot = new THREE.Group();
+    pivot.position.set(x, 2.66, 0.55);
+    const string = cyl(0.012, 0.012, 0.3, 5, ink);
+    string.position.y = -0.15;
+    pivot.add(string);
+    const body = cyl(0.21, 0.21, 0.38, 12, cream, true);
+    body.position.y = -0.52;
+    pivot.add(body);
+    for (const y of [-0.35, -0.69]) {
+      const cap = cyl(0.12, 0.12, 0.07, 10, ink);
+      cap.position.y = y;
+      pivot.add(cap);
+    }
+    const glow = sph(0.075, lampGlowMat);
+    glow.position.y = -0.5;
+    pivot.add(glow);
+    g.add(pivot);
+    lanterns.push(pivot);
+  }
+
+  // ---- dua lampion batu (tōrō) di jalan menuju pintu ----
+  const toroGlows: THREE.Mesh[] = [];
+  for (const x of [-1.95, 1.95]) {
+    const base = cyl(0.2, 0.24, 0.14, 8, stone);
+    base.position.set(x, 0.07, 1.75);
+    g.add(base);
+    const post = cyl(0.08, 0.09, 0.5, 8, stone);
+    post.position.set(x, 0.39, 1.75);
+    g.add(post);
+    const lightBox = box(0.3, 0.26, 0.3, gold, true);
+    lightBox.position.set(x, 0.77, 1.75);
+    g.add(lightBox);
+    const glow = sph(0.08, lampGlowMat);
+    glow.position.set(x, 0.77, 1.95);
+    g.add(glow);
+    toroGlows.push(glow);
+    const cap = new THREE.Mesh(new THREE.ConeGeometry(0.3, 0.22, 4), ink);
+    withOutline(cap, 1.1);
+    cap.position.set(x, 1.01, 1.75);
+    cap.rotation.y = Math.PI / 4;
+    g.add(cap);
+    const top = sph(0.06, gold);
+    top.position.set(x, 1.16, 1.75);
+    g.add(top);
+  }
+
+  // ---- pohon sakura kecil di sisi belakang ----
+  const trunk = cyl(0.11, 0.15, 1.25, 8, wood);
+  trunk.position.set(2.05, 0.62, -1.35);
+  withOutline(trunk, 1.06);
+  g.add(trunk);
+  for (const [x, y, z, r, c] of [
+    [2.05, 1.75, -1.35, 0.72, PLAYFUL.berry],
+    [1.55, 1.45, -1.05, 0.45, PLAYFUL.berry],
+    [2.5, 1.5, -1.05, 0.42, 0xf2c4ce],
+  ]) {
+    const blossom = sph(r, toon(c), true);
+    blossom.position.set(x, y, z);
+    g.add(blossom);
+  }
+
+  // ---- kristal data (jejak repo kanjicho-data) ----
+  const crystalMat = toon(accent);
+  const crystal = new THREE.Mesh(new THREE.OctahedronGeometry(0.34, 0), crystalMat);
+  withOutline(crystal, 1.1);
+  crystal.position.set(-2.15, 1.05, -0.6);
+  g.add(crystal);
+
+  // ---- roh kanji: kartu sprite melayang naik di halaman depan ----
+  const spirits: Array<{
+    sprite: THREE.Sprite;
+    mat: THREE.SpriteMaterial;
+    x: number;
+    z: number;
+    speed: number;
+    phase: number;
+  }> = [];
+  const KANJI = ["漢", "字", "帳", "学", "山", "空"];
+  const spiritSpec: Array<[number, number, number, number]> = [
+    // x, z, speed, phase
+    [-2.4, 1.3, 0.16, 0.0],
+    [-1.5, 0.7, 0.2, 0.35],
+    [-0.7, 1.7, 0.14, 0.6],
+    [0.8, 1.1, 0.19, 0.15],
+    [1.9, 0.6, 0.15, 0.5],
+    [2.5, 1.5, 0.22, 0.8],
+  ];
+  spiritSpec.forEach(([x, z, speed, phase], i) => {
+    const tex = kanjiCardTexture(KANJI[i]);
+    disposables.push(tex);
+    const mat = new THREE.SpriteMaterial({
+      map: tex,
+      transparent: true,
+      depthWrite: false,
+      fog: false,
+    });
+    disposables.push(mat);
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(0.52, 0.52, 1);
+    sprite.position.set(x, 1.0, z);
+    g.add(sprite);
+    spirits.push({ sprite, mat, x, z, speed, phase });
+  });
+
+  // ---- titik pintu (trigger engine) ----
+  const door = new THREE.Object3D();
+  door.name = "kanjiHallDoor";
+  door.position.set(0, 0.5, 2.05);
+  g.add(door);
 
   return {
     group: g,
+    door,
     update(t) {
-      crystals.forEach((c, i) => {
-        c.rotation.y = t * (1.1 + i * 0.35);
-        c.position.y = spec[i][1] + Math.sin(t * 1.6 + i * 2) * 0.08;
+      // lampion bergoyang lembut
+      lanterns.forEach((l, i) => {
+        l.rotation.z = Math.sin(t * 1.4 + i * 2.2) * 0.08;
+        l.rotation.x = Math.sin(t * 1.1 + i * 1.4) * 0.05;
       });
+      // nyala lampion berdenyut
+      const pulse = 0.9 + Math.sin(t * 2.6) * 0.1;
+      for (const l of lanterns) l.children[3].scale.setScalar(pulse);
+      for (const glow of toroGlows) glow.scale.setScalar(pulse);
+      roomLight.intensity = 0.75 + Math.sin(t * 1.8) * 0.12;
+      // plakat berayun
+      plaquePivot.rotation.z = Math.sin(t * 1.2) * 0.03;
+      // kristal data berputar & mengambang
+      crystal.rotation.y = t * 0.9;
+      crystal.position.y = 1.05 + Math.sin(t * 1.5) * 0.1;
+      // roh kanji naik perlahan lalu mengulang
+      for (const s of spirits) {
+        const frac = (t * s.speed + s.phase) % 1;
+        s.sprite.position.set(
+          s.x + Math.sin(t * 1.6 + s.phase * 7) * 0.16,
+          0.75 + frac * 2.9,
+          s.z + Math.cos(t * 1.3 + s.phase * 5) * 0.12
+        );
+        s.mat.opacity = Math.sin(Math.PI * frac) ** 0.7;
+      }
     },
   };
 }
@@ -686,7 +969,7 @@ export function buildDiorama(
 
   switch (projectIndex) {
     case 0: return buildScooter(ctx);
-    case 1: return buildTorii(ctx);
+    case 1: return buildKanjiHall(ctx);
     case 2: return buildPadlock(ctx);
     case 3: return buildSignpost(ctx);
     case 4: return buildClock(ctx);

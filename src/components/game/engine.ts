@@ -9,6 +9,23 @@ import { Sfx } from "./sfx";
 import { InputManager } from "./input";
 import { Multiplayer } from "./multiplayer";
 import {
+  buildKanjiHallInterior,
+  type InteriorHandle,
+  type InsideStation,
+} from "./interior";
+import {
+  EMOTES,
+  emoteById,
+  emoteIconTexture,
+  emoteUnlocked,
+  unlockStars,
+  loadMaxStars,
+  saveMaxStars,
+  loadGoldScarf,
+  saveGoldScarf,
+  disposeEmoteIcons,
+} from "./emotes";
+import {
   PALETTE,
   type EngineCallbacks,
   type PlayerAction,
@@ -30,6 +47,7 @@ const RESPAWN_Y = -26;
 const EDGE_MARGIN = 0.3;
 const TALK_RANGE = 2.3;
 const TALK_DURATION = 6.0;
+const DOOR_RANGE = 2.1;
 
 export class GameEngine {
   private renderer!: THREE.WebGLRenderer;
@@ -79,6 +97,26 @@ export class GameEngine {
   private talkTimer = 0;
   private nearNpcIsland: number | null = null;
 
+  // pintu gedung proyek (Kanji Hall dkk.)
+  private nearDoorIsland: number | null = null;
+  private doorV = new THREE.Vector3();
+
+  // interior 3D gedung proyek (ruangan "dimensi saku")
+  private interiors = new Map<number, InteriorHandle>();
+  private insideIsland: number | null = null;
+  private returnPos = new THREE.Vector3();
+  private insideNear: InsideStation | null = null;
+  private insideNearKey: string | null = null;
+
+  // emote (bintang → unlock)
+  private emoteActiveId: string | null = null;
+  private emoteT = 0;
+  private emoteIcon: THREE.Sprite | null = null;
+  private maxStarsSaved = 0;
+  private goldScarf = false;
+  private firedUnlocks = new Set<string>();
+  private quizStreak = 0;
+
   // dash state
   private dashT = 0;
   private dashCD = 0;
@@ -106,9 +144,30 @@ export class GameEngine {
     this.stars = createStars(this.scene, this.islands.starSpots);
     this.effects = createEffects(this.scene);
     this.npcs = createNpcs(this.scene, this.islands.handles);
+
+    // ---- interior 3D gedung proyek (saat ini: Kanji Hall) ----
+    projects.forEach((p, i) => {
+      if (!p.showcase) return;
+      const islandIndex = i + 1; // pulau 0 = Beranda
+      const handle = this.islands.handles[islandIndex];
+      if (!handle?.diorama?.door) return;
+      const interior = buildKanjiHallInterior(p.showcase);
+      this.interiors.set(islandIndex, interior);
+      this.scene.add(interior.group);
+    });
+
+    // ---- pencapaian tersimpan (emote & syal emas) ----
+    this.maxStarsSaved = loadMaxStars();
+    this.goldScarf = loadGoldScarf();
+    if (this.goldScarf) this.character.setScarfGold(true);
+
     this.input = new InputManager(container);
     this.input.camDist = 11;
     this.input.onTalkKey = () => this.tryTalk();
+    this.input.onEmoteKey = (slot) => {
+      if (typeof slot === "number") this.playEmote(EMOTES[slot - 1]?.id ?? "");
+      else if (slot === "next") this.playNextEmote();
+    };
 
     // ---- multiplayer (opsional): tamu lain bila host ruang diset ----
     if (opts.multiplayerHost) {
@@ -161,15 +220,21 @@ export class GameEngine {
     this.input.tick(dt);
     this.physics(dt);
     this.updateMultiplayer(dt);
+    this.updateEmote(dt);
     this.env.update(t);
     this.islands.update(t, this.groundIslandIndex);
     this.npcs.update(dt, t, this.pos);
     this.stars.update(dt, t);
     this.effects.update(dt);
+    if (this.insideIsland !== null) {
+      const interior = this.interiors.get(this.insideIsland);
+      interior?.update(dt, t);
+    }
     this.updateCharacterAnim(dt, t);
     this.updateCamera(dt, false);
     this.updateBubblePos();
     this.updateNpcProximity();
+    this.updateDoorProximity();
     if (this.talkTimer > 0) {
       this.talkTimer -= dt;
       if (this.talkTimer <= 0) {
@@ -215,7 +280,9 @@ export class GameEngine {
 
   // ================= fisika =================
   private physics(dt: number) {
-    const move = this.inputEnabled ? this.input.getMove() : { x: 0, y: 0 };
+    // gerak terkunci selama emote bermain
+    const move =
+      this.inputEnabled && this.emoteT <= 0 ? this.input.getMove() : { x: 0, y: 0 };
     const hasInput = Math.hypot(move.x, move.y) > 0.08;
     const yaw = this.input.camYaw;
     const s = Math.sin(yaw);
@@ -302,6 +369,16 @@ export class GameEngine {
     this.pos.z += this.vel.z * dt;
     this.pos.y += this.vel.y * dt;
 
+    // ---- DI DALAM GEDUNG: lantai datar + dinding AABB ----
+    if (this.insideIsland !== null) {
+      this.physicsInterior();
+      if (Math.hypot(this.vel.x, this.vel.z) > 1.4 && hasInput) {
+        this.fireAction("move");
+      }
+      this.character.group.position.copy(this.pos);
+      return;
+    }
+
     // ---- tetap menempel platform yang dipijak (pulau mengambang) ----
     if (this.grounded) {
       const col = this.islands.colliders[this.groundCollider];
@@ -361,6 +438,12 @@ export class GameEngine {
       this.sfx.collect(this.combo);
       this.thump(0.18, 45);
       this.cb.onStar(this.collected, this.stars.total);
+      // catat pencapaian tertinggi (pembuka emote permanen)
+      if (this.collected > this.maxStarsSaved) {
+        this.maxStarsSaved = this.collected;
+        saveMaxStars(this.collected);
+      }
+      this.checkUnlocks();
       if (this.collected === this.stars.total) {
         this.sfx.allStars();
         this.cb.onAllStars();
@@ -379,6 +462,46 @@ export class GameEngine {
     }
 
     this.character.group.position.copy(this.pos);
+  }
+
+  /** Fisika khusus ruangan interior: lantai rata + dinding clamp */
+  private physicsInterior() {
+    const interior = this.interiors.get(this.insideIsland as number);
+    if (!interior) {
+      this.exitBuilding();
+      return;
+    }
+    const b = interior.bounds;
+    // dinding (kotak sumbu — clamp pasti benar)
+    this.pos.x = Math.min(b.maxX, Math.max(b.minX, this.pos.x));
+    this.pos.z = Math.min(b.maxZ, Math.max(b.minZ, this.pos.z));
+    // lantai
+    if (this.pos.y <= b.floorY) {
+      if (!this.grounded) {
+        this.pos.y = b.floorY;
+        this.grounded = true;
+        this.groundCollider = -2;
+        this.groundIslandIndex = null;
+        this.airJumps = 1;
+        this.dashT = 0;
+        this.vel.y = 0;
+        this.character.onLand();
+        this.effects.dust(this.pos.x, this.pos.y, this.pos.z, 4);
+        this.sfx.land();
+        this.thump(0.3, 60);
+      } else {
+        this.pos.y = b.floorY;
+        this.vel.y = 0;
+      }
+    } else if (this.grounded) {
+      // melompat dari lantai
+      this.grounded = false;
+    }
+    // pengaman: tidak ada kehampaan di dalam ruangan
+    if (this.pos.y < b.floorY - 2) {
+      this.pos.y = b.floorY;
+      this.vel.set(0, 0, 0);
+    }
   }
 
   private landOn(colliderIndex: number) {
@@ -452,15 +575,21 @@ export class GameEngine {
 
     // bayangan blob: cari permukaan di bawah karakter
     let shadowY: number | null = null;
-    for (const col of this.islands.colliders) {
-      const dx = this.pos.x - col.cx;
-      const dz = this.pos.z - col.cz;
-      if (
-        dx * dx + dz * dz <= (col.radius + 0.3) ** 2 &&
-        col.topY <= this.pos.y + 0.05 &&
-        (shadowY === null || col.topY > shadowY)
-      ) {
-        shadowY = col.topY;
+    if (this.insideIsland !== null) {
+      // di dalam gedung: lantai ruangan
+      const b = this.interiors.get(this.insideIsland)?.bounds;
+      if (b && this.pos.y >= b.floorY - 0.1) shadowY = b.floorY;
+    } else {
+      for (const col of this.islands.colliders) {
+        const dx = this.pos.x - col.cx;
+        const dz = this.pos.z - col.cz;
+        if (
+          dx * dx + dz * dz <= (col.radius + 0.3) ** 2 &&
+          col.topY <= this.pos.y + 0.05 &&
+          (shadowY === null || col.topY > shadowY)
+        ) {
+          shadowY = col.topY;
+        }
       }
     }
     const sh = this.character.shadow;
@@ -478,7 +607,11 @@ export class GameEngine {
 
   // ================= kamera =================
   private updateCamera(dt: number, snap: boolean) {
-    const dist = this.input.camDist;
+    // di dalam ruangan: jarak kamera lebih dekat agar tidak menembus dinding
+    const dist =
+      this.insideIsland !== null
+        ? Math.min(this.input.camDist, 9)
+        : this.input.camDist;
 
     // auto-align: kamera mengikuti belakang pelan saat bergerak
     if (
@@ -511,6 +644,17 @@ export class GameEngine {
     } else {
       const k = 1 - Math.exp(-8 * dt);
       this.smoothCamPos.lerp(target, k);
+    }
+    // di dalam ruangan: kamera TIDAK boleh keluar kotak ruangan
+    // (dinding sumbu-sejajar → clamp posisi kamera pasti benar)
+    if (this.insideIsland !== null) {
+      const b = this.interiors.get(this.insideIsland)?.bounds;
+      if (b) {
+        this.smoothCamPos.x = Math.min(b.maxX + 0.25, Math.max(b.minX - 0.25, this.smoothCamPos.x));
+        this.smoothCamPos.z = Math.min(b.maxZ + 0.25, Math.max(b.minZ - 0.25, this.smoothCamPos.z));
+        this.smoothCamPos.y = Math.min(b.ceilY, Math.max(b.floorY + 0.45, this.smoothCamPos.y));
+        target.set(this.smoothCamPos.x, this.smoothCamPos.y, this.smoothCamPos.z);
+      }
     }
     this.camera.position.copy(this.smoothCamPos);
     this.camera.lookAt(this.pos.x, this.pos.y + 0.85, this.pos.z);
@@ -571,9 +715,125 @@ export class GameEngine {
     }
   }
 
-  /** Dispar saat tombol E / tombol BICARA ditekan (bisa juga dari React) */
+  // ================= interaksi gedung =================
+  /** Station interior / pintu gedung mana yang sedang dekat pemain */
+  private updateDoorProximity() {
+    // ---- di dalam gedung: station terdekat ----
+    if (this.insideIsland !== null) {
+      const interior = this.interiors.get(this.insideIsland);
+      let best: InsideStation | null = null;
+      let bestD = Infinity;
+      if (interior && this.inputEnabled) {
+        for (const st of interior.stations) {
+          const dx = this.pos.x - st.x;
+          const dz = this.pos.z - st.z;
+          const dy = this.pos.y - st.y;
+          const d = Math.hypot(dx, dz);
+          if (d < st.r && dy > -1.6 && dy < 3.6 && d < bestD) {
+            best = st;
+            bestD = d;
+          }
+        }
+      }
+      const key = best
+        ? `${best.kind}|${best.galleryIdx ?? best.padIdx ?? ""}`
+        : null;
+      if (key !== this.insideNearKey) {
+        this.insideNear = best;
+        this.insideNearKey = key;
+        this.cb.onInsideNear?.(
+          best
+            ? {
+                kind: best.kind,
+                caption: best.caption,
+                galleryIdx: best.galleryIdx,
+              }
+            : null
+        );
+      }
+      if (this.nearDoorIsland !== null) {
+        this.nearDoorIsland = null;
+        this.cb.onDoorNear?.(null);
+      }
+      return;
+    }
+
+    // ---- di luar: pintu gedung ----
+    if (this.insideNearKey !== null) {
+      this.insideNear = null;
+      this.insideNearKey = null;
+      this.cb.onInsideNear?.(null);
+    }
+    let idx: number | null = null;
+    if (this.inputEnabled) {
+      for (const h of this.islands.handles) {
+        const door = h.diorama?.door;
+        if (!door) continue;
+        door.getWorldPosition(this.doorV);
+        const dx = this.pos.x - this.doorV.x;
+        const dz = this.pos.z - this.doorV.z;
+        const dy = this.pos.y - this.doorV.y;
+        if (Math.hypot(dx, dz) < DOOR_RANGE && dy > -1.2 && dy < 2.6) {
+          idx = h.index;
+          break;
+        }
+      }
+    }
+    if (idx !== this.nearDoorIsland) {
+      this.nearDoorIsland = idx;
+      this.cb.onDoorNear?.(idx);
+    }
+  }
+
+  /** Dispar saat tombol E / tombol BICARA ditekan (bisa juga dari React).
+   *  Prioritas: interaksi interior > pintu gedung > sapa NPC. */
   tryTalk() {
     if (!this.inputEnabled) return;
+
+    // ---- di dalam gedung ----
+    if (this.insideIsland !== null) {
+      const st = this.insideNear;
+      if (!st) return;
+      if (st.kind === "exit") {
+        this.exitBuilding();
+        return;
+      }
+      if (st.kind === "book") {
+        this.sfx.talk();
+        this.cb.onEnterBuilding?.(this.insideIsland);
+        return;
+      }
+      if (st.kind === "shot") {
+        this.sfx.talk();
+        this.cb.onEnterBuilding?.(this.insideIsland, st.galleryIdx);
+        return;
+      }
+      if (st.kind === "pad") {
+        const interior = this.interiors.get(this.insideIsland);
+        if (!interior || st.padIdx === undefined) return;
+        const res = interior.answerPad(st.padIdx);
+        if (!res) return; // kuis terkunci sementara
+        this.quizStreak = res.streak;
+        if (res.correct) {
+          this.sfx.collect(Math.min(this.quizStreak, 8));
+          this.effects.burst(this.pos.x, this.pos.y + 1.1, this.pos.z);
+          this.effects.confetti(this.pos.x, this.pos.y, this.pos.z);
+          this.thump(0.35, 80);
+        } else {
+          this.sfx.talk();
+          this.thump(0.15, 60);
+        }
+        this.cb.onQuizResult?.(res.correct, res.streak);
+        return;
+      }
+      return;
+    }
+
+    // ---- pintu gedung → masuk ruangan 3D ----
+    if (this.nearDoorIsland !== null) {
+      this.enterBuilding(this.nearDoorIsland);
+      return;
+    }
     const npc = this.findNearNpc();
     if (!npc) return;
     npc.excite();
@@ -587,9 +847,153 @@ export class GameEngine {
     });
   }
 
+  // ================= interior gedung =================
+  /** Masuk ke ruangan 3D gedung proyek (pintu / tombol panel) */
+  enterBuilding(islandIndex: number) {
+    if (this.insideIsland === islandIndex) return;
+    const interior = this.interiors.get(islandIndex);
+    if (!interior) {
+      // tidak ada interior 3D — fallback ke overlay pameran
+      this.cb.onEnterBuilding?.(islandIndex);
+      return;
+    }
+    if (this.insideIsland !== null) this.exitBuilding();
+    // ingat posisi kembali (tepat di depan pintu tempat pemain berdiri)
+    this.returnPos.copy(this.pos);
+    this.returnPos.y += 0.02;
+    interior.setVisible(true);
+    this.pos.copy(interior.spawn);
+    this.vel.set(0, 0, 0);
+    this.grounded = true;
+    this.groundCollider = -2;
+    this.groundIslandIndex = null;
+    this.coyote = 0;
+    this.dashT = 0;
+    this.talkNpc = null;
+    this.talkTimer = 0;
+    this.insideIsland = islandIndex;
+    this.insideNear = null;
+    this.insideNearKey = null;
+    this.cb.onInsideNear?.(null);
+    this.cb.onPlatformChange(null);
+    this.cb.onBuildingInside?.(islandIndex);
+    this.sfx.visit();
+    this.thump(0.25, 70);
+    this.updateCamera(0, true);
+  }
+
+  /** Keluar dari interior → kembali ke depan pintu gedung */
+  exitBuilding() {
+    if (this.insideIsland === null) return;
+    const interior = this.interiors.get(this.insideIsland);
+    interior?.setVisible(false);
+    this.pos.copy(this.returnPos);
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.coyote = 0;
+    this.dashT = 0;
+    this.insideIsland = null;
+    this.insideNear = null;
+    this.insideNearKey = null;
+    this.cb.onInsideNear?.(null);
+    this.cb.onBuildingInside?.(null);
+    this.sfx.talk();
+    this.updateCamera(0, true);
+  }
+
+  // ================= emote =================
+  /** Mainkan emote (dipanggil UI / tombol Q / gamepad) — cek unlock bintang.
+   *  Sengaja TIDAK dicek inputEnabled: roda emote mematikan input engine,
+   *  tapi emote yang dipilih dari roda tetap harus bisa bermain. */
+  playEmote(id: string) {
+    if (!id || this.emoteT > 0) return;
+    const def = emoteById(id);
+    if (!def) return;
+    const stars = Math.max(this.collected, this.maxStarsSaved);
+    if (!emoteUnlocked(def, stars, this.stars.total)) {
+      this.cb.onEmoteBlocked?.(def.id, unlockStars(def, this.stars.total));
+      return;
+    }
+    this.emoteActiveId = id;
+    this.emoteT = def.dur;
+    this.character.playEmote(id, def.dur);
+    if (def.fx === "hearts") this.effects.hearts(this.pos.x, this.pos.y, this.pos.z);
+    if (def.fx === "confetti")
+      this.effects.confetti(this.pos.x, this.pos.y, this.pos.z);
+    this.sfx.emote();
+    this.multiplayer?.sendEmote(id);
+    // ikon emote melayang di atas kepala (terlihat pemain sendiri & konsisten
+    // dengan yang dilihat tamu lain pada ghost)
+    if (!this.emoteIcon) {
+      const mat = new THREE.SpriteMaterial({ transparent: true, depthWrite: false });
+      this.emoteIcon = new THREE.Sprite(mat);
+      this.emoteIcon.scale.set(0.55, 0.55, 1);
+      this.emoteIcon.renderOrder = 5;
+      this.scene.add(this.emoteIcon);
+    }
+    const mat = this.emoteIcon.material as THREE.SpriteMaterial;
+    mat.map = emoteIconTexture(id);
+    mat.needsUpdate = true;
+    this.emoteIcon.visible = true;
+  }
+
+  /** Siklus ke emote berikutnya yang sudah terbuka (gamepad LB) */
+  playNextEmote() {
+    const stars = Math.max(this.collected, this.maxStarsSaved);
+    const unlocked = EMOTES.filter((d) =>
+      emoteUnlocked(d, stars, this.stars.total)
+    );
+    if (unlocked.length <= 1) {
+      this.playEmote("wave");
+      return;
+    }
+    const cur = unlocked.findIndex((d) => d.id === this.emoteActiveId);
+    const next = unlocked[(cur + 1) % unlocked.length];
+    this.playEmote(next.id);
+  }
+
+  /** Posisi ikon emote sendiri + akhir durasi */
+  private updateEmote(dt: number) {
+    if (this.emoteT <= 0) return;
+    this.emoteT = Math.max(0, this.emoteT - dt);
+    if (this.emoteIcon) {
+      this.emoteIcon.position.set(
+        this.pos.x,
+        this.pos.y + 2.1 + Math.sin(this.elapsed * 3) * 0.06,
+        this.pos.z
+      );
+      if (this.emoteT <= 0) this.emoteIcon.visible = false;
+    }
+  }
+
+  /** Cek pencapaian baru setelah bintang terkumpul (emote & syal emas) */
+  private checkUnlocks() {
+    const total = this.stars.total;
+    for (const def of EMOTES) {
+      const need = unlockStars(def, total);
+      if (
+        need > 0 &&
+        this.collected >= need &&
+        !this.firedUnlocks.has(def.id)
+      ) {
+        this.firedUnlocks.add(def.id);
+        this.cb.onEmoteUnlocked?.(def.id);
+        this.sfx.milestone();
+      }
+    }
+    if (!this.goldScarf && total > 0 && this.collected >= total) {
+      this.goldScarf = true;
+      saveGoldScarf();
+      this.character.setScarfGold(true);
+      this.cb.onScarfUnlock?.();
+    }
+  }
+
   // ================= API publik =================
   /** Teleport karakter ke pulau proyek (untuk daftar proyek) */
   teleportTo(index: number) {
+    // bila sedang di dalam gedung: keluar dulu (posisi kembali diabaikan)
+    if (this.insideIsland !== null) this.exitBuilding();
     const handle = this.islands.handles[index];
     this.pos.set(
       handle.group.position.x,
@@ -617,6 +1021,12 @@ export class GameEngine {
     return { collected: this.collected, total: this.stars.total };
   }
 
+  /** Buka/tutup syal emas (hadiah semua bintang) */
+  setGoldScarf(on: boolean) {
+    if (!this.goldScarf && on) return; // belum berhak
+    this.character.setScarfGold(on);
+  }
+
   /** State internal untuk debugging/pengujian (dipakai via window hook) */
   getDebugState() {
     return {
@@ -624,10 +1034,21 @@ export class GameEngine {
       vel: { x: this.vel.x, y: this.vel.y, z: this.vel.z },
       grounded: this.grounded,
       island: this.groundIslandIndex,
+      nearDoor: this.nearDoorIsland,
+      inside: this.insideIsland,
+      insideNear: this.insideNear
+        ? `${this.insideNear.kind}${
+            this.insideNear.galleryIdx ?? this.insideNear.padIdx ?? ""
+          }`
+        : null,
+      emoteT: this.emoteT,
+      quizStreak: this.quizStreak,
       dashT: this.dashT,
       dashCD: this.dashCD,
       airJumps: this.airJumps,
       collected: this.collected,
+      maxStarsSaved: this.maxStarsSaved,
+      goldScarf: this.goldScarf,
       visited: this.visited.size,
       mp: this.multiplayer ? this.multiplayer.getDebug() : null,
     };
@@ -653,6 +1074,14 @@ export class GameEngine {
     this.stars.dispose();
     this.effects.dispose();
     this.character.dispose();
+    for (const interior of this.interiors.values()) interior.dispose();
+    this.interiors.clear();
+    if (this.emoteIcon) {
+      this.scene.remove(this.emoteIcon);
+      (this.emoteIcon.material as THREE.SpriteMaterial).dispose();
+      this.emoteIcon = null;
+    }
+    disposeEmoteIcons();
     this.sfx.dispose();
     this.renderer.dispose();
     void this.scene.clear();

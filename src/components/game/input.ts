@@ -49,6 +49,11 @@ export class InputManager {
 
   /** Dipanggil saat tombol bicara (E) ditekan — diset oleh engine */
   onTalkKey: (() => void) | null = null;
+  /** Dipanggil saat tombol emote ditekan:
+   *  - "wheel" = buka/tutup roda emote
+   *  - "next" = emote berikutnya (gamepad LB)
+   *  - 1..7   = emote slot N langsung */
+  onEmoteKey: ((slot: number | "wheel" | "next") => void) | null = null;
 
   constructor(private element: HTMLElement) {
     this.onKeyDownBound = (e) => {
@@ -65,6 +70,12 @@ export class InputManager {
       }
       if (k === "e" && !this.keys.has(k)) {
         this.onTalkKey?.();
+      }
+      if (k === "q" && !this.keys.has(k)) {
+        this.onEmoteKey?.("wheel");
+      }
+      if (/^[1-7]$/.test(k) && !this.keys.has(k)) {
+        this.onEmoteKey?.(Number(k));
       }
       this.keys.add(k);
     };
@@ -256,6 +267,8 @@ export class InputManager {
       if (justPressed(0)) this.jumpBufferT = 0.15; // A / Cross — lompat
       if (justPressed(1) || justPressed(2)) this.dashBufferT = 0.2; // B / X — dash
       if (justPressed(3)) this.onTalkKey?.(); // Y / Triangle — sapa
+      if (justPressed(4)) this.onEmoteKey?.("next"); // LB — emote berikutnya
+      if (justPressed(5)) this.onEmoteKey?.("wheel"); // RB — roda emote
     }
     this.jumpHeldPad = b(0); // tahan A saat jatuh = melayang
 

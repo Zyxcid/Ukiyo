@@ -10,8 +10,32 @@ export interface EffectsResult {
   burst(x: number, y: number, z: number): void;
   ring(x: number, y: number, z: number): void;
   trail(x: number, y: number, z: number): void;
+  /** hati melayang (emote "hearts") */
+  hearts(x: number, y: number, z: number): void;
+  /** konfeti warna-warni (emote "glitter") */
+  confetti(x: number, y: number, z: number): void;
   update(dt: number): void;
   dispose(): void;
+}
+
+/** Tekstur hati doodle (emote "hearts") */
+function heartTexture(): THREE.CanvasTexture {
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = 64;
+  const g = cv.getContext("2d")!;
+  g.translate(32, 34);
+  g.beginPath();
+  g.moveTo(0, 14);
+  g.bezierCurveTo(-20, -4, -11, -20, 0, -7);
+  g.bezierCurveTo(11, -20, 20, -4, 0, 14);
+  g.closePath();
+  g.fillStyle = "#e4572e";
+  g.fill();
+  g.lineWidth = 6;
+  g.lineJoin = "round";
+  g.strokeStyle = "#1C1813";
+  g.stroke();
+  return new THREE.CanvasTexture(cv);
 }
 
 export function createEffects(scene: THREE.Scene): EffectsResult {
@@ -89,6 +113,55 @@ export function createEffects(scene: THREE.Scene): EffectsResult {
     rings.push({ mesh: m, life: 0, on: false });
   }
 
+  // ---------- hati (emote) ----------
+  interface FloatFx {
+    sprite: THREE.Sprite;
+    material: THREE.SpriteMaterial;
+    vx: number;
+    vy: number;
+    vz: number;
+    life: number;
+    maxLife: number;
+    on: boolean;
+  }
+  const floats: FloatFx[] = [];
+  const heartTex = heartTexture();
+  for (let i = 0; i < 10; i++) {
+    const mat = new THREE.SpriteMaterial({ map: heartTex, transparent: true, depthWrite: false });
+    const sp = new THREE.Sprite(mat);
+    sp.visible = false;
+    sp.scale.set(0.34, 0.34, 1);
+    scene.add(sp);
+    floats.push({ sprite: sp, material: mat, vx: 0, vy: 1, vz: 0, life: 0, maxLife: 1, on: false });
+  }
+
+  // ---------- konfeti (emote) ----------
+  interface ConfettiFx {
+    mesh: THREE.Mesh;
+    material: THREE.MeshBasicMaterial;
+    vx: number;
+    vy: number;
+    vz: number;
+    spin: number;
+    life: number;
+    maxLife: number;
+    on: boolean;
+  }
+  const confetti: ConfettiFx[] = [];
+  const CONFETTI_COLORS = [0xe4572e, 0xf7b32b, 0x2ec4b6, 0xd95d9e, 0x6ec6ff, 0x7bc47f];
+  const confettiGeo = new THREE.PlaneGeometry(0.14, 0.09);
+  for (let i = 0; i < 26; i++) {
+    const material = new THREE.MeshBasicMaterial({
+      color: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
+      side: THREE.DoubleSide,
+      transparent: true,
+    });
+    const m = new THREE.Mesh(confettiGeo, material);
+    m.visible = false;
+    scene.add(m);
+    confetti.push({ mesh: m, material, vx: 0, vy: 0, vz: 0, spin: 0, life: 0, maxLife: 1, on: false });
+  }
+
   return {
     dust(x, y, z, n) {
       let c = 0;
@@ -146,6 +219,41 @@ export function createEffects(scene: THREE.Scene): EffectsResult {
         break;
       }
     },
+    hearts(x, y, z) {
+      let c = 0;
+      for (const f of floats) {
+        if (f.on) continue;
+        f.on = true;
+        f.life = 0;
+        f.maxLife = 1.1 + Math.random() * 0.4;
+        f.sprite.visible = true;
+        f.sprite.position.set(
+          x + (Math.random() - 0.5) * 0.7,
+          y + 0.7 + Math.random() * 0.5,
+          z + (Math.random() - 0.5) * 0.7
+        );
+        f.vx = (Math.random() - 0.5) * 0.8;
+        f.vy = 0.9 + Math.random() * 0.7;
+        f.vz = (Math.random() - 0.5) * 0.8;
+        if (++c >= 6) break;
+      }
+    },
+    confetti(x, y, z) {
+      for (const f of confetti) {
+        if (f.on) continue;
+        f.on = true;
+        f.life = 0;
+        f.maxLife = 0.9 + Math.random() * 0.5;
+        f.mesh.visible = true;
+        f.mesh.position.set(x, y + 1.1, z);
+        const an = Math.random() * Math.PI * 2;
+        const sp = 1.4 + Math.random() * 2.2;
+        f.vx = Math.cos(an) * sp;
+        f.vz = Math.sin(an) * sp;
+        f.vy = 2.6 + Math.random() * 2.4;
+        f.spin = (Math.random() - 0.5) * 14;
+      }
+    },
     update(dt) {
       for (const p of particles) {
         if (!p.on) continue;
@@ -191,12 +299,48 @@ export function createEffects(scene: THREE.Scene): EffectsResult {
         r.mesh.scale.setScalar(0.6 + p * 3.2);
         ringMat.opacity = 0.9 * (1 - p);
       }
+      for (const f of floats) {
+        if (!f.on) continue;
+        f.life += dt;
+        if (f.life > f.maxLife) {
+          f.on = false;
+          f.sprite.visible = false;
+          continue;
+        }
+        f.sprite.position.x += f.vx * dt;
+        f.sprite.position.y += f.vy * dt;
+        f.sprite.position.z += f.vz * dt;
+        const k = 1 - f.life / f.maxLife;
+        f.material.opacity = Math.min(1, k * 1.6);
+        const s = 0.3 + (1 - k) * 0.12;
+        f.sprite.scale.set(s, s, 1);
+      }
+      for (const f of confetti) {
+        if (!f.on) continue;
+        f.life += dt;
+        if (f.life > f.maxLife) {
+          f.on = false;
+          f.mesh.visible = false;
+          continue;
+        }
+        f.vy -= 4.4 * dt;
+        f.mesh.position.x += f.vx * dt;
+        f.mesh.position.y += f.vy * dt;
+        f.mesh.position.z += f.vz * dt;
+        f.mesh.rotation.x += f.spin * dt;
+        f.mesh.rotation.y += f.spin * 0.7 * dt;
+        f.material.opacity = Math.min(1, (1 - f.life / f.maxLife) * 2.2);
+      }
     },
     dispose() {
       for (const p of particles) scene.remove(p.mesh);
       for (const b of bursts) scene.remove(b.sprite);
       for (const r of rings) scene.remove(r.mesh);
+      for (const f of floats) scene.remove(f.sprite);
+      for (const f of confetti) scene.remove(f.mesh);
       for (const b of bursts) b.material.dispose();
+      for (const f of floats) f.material.dispose();
+      for (const f of confetti) f.material.dispose();
       dustMat.dispose();
       trailMat.dispose();
       dustGeo.dispose();
@@ -204,6 +348,8 @@ export function createEffects(scene: THREE.Scene): EffectsResult {
       ringMat.dispose();
       ringGeo.dispose();
       sTex.dispose();
+      heartTex.dispose();
+      confettiGeo.dispose();
     },
   };
 }
