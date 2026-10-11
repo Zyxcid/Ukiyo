@@ -1,6 +1,8 @@
 /**
  * Data proyek — diambil dari GitHub Zyxcid (https://github.com/Zyxcid)
  * Di-scrape pada 2026-10-11, diurutkan dari yang terbaru diperbarui.
+ * Catatan: repo profil "Zyxcid" TIDAK jadi pulau proyek — perannya digantikan
+ * pulau pusat (Beranda) yang kini memperkenalkan zyxcid + tautan profil GitHub.
  */
 
 export interface Project {
@@ -190,16 +192,6 @@ export const PROJECTS: Project[] = [
     url: "https://github.com/Zyxcid/kanjicho-privacy-policy",
   },
   {
-    name: "Zyxcid",
-    githubDescription: "",
-    note: "Repo profil — halaman muka GitHub Zyxcid yang sedang kamu lihat sekarang ini.",
-    language: null,
-    langColor: "#c9c4e8",
-    accent: "#D95D9E",
-    updatedAt: "2026-09-04T08:23:32Z",
-    url: "https://github.com/Zyxcid",
-  },
-  {
     name: "t3r",
     githubDescription: "a simple 20 20 20 rule timer",
     note: "Timer sederhana untuk aturan 20-20-20 — istirahatkan mata tiap 20 menit, lihat objek 20 kaki jauhnya, selama 20 detik.",
@@ -263,15 +255,14 @@ export const PROJECTS: Project[] = [
 ];
 
 /**
- * Kalimat penghuni pulau (index 0 = pulau pusat, 1..10 = pulau proyek).
+ * Kalimat penghuni pulau (index 0 = pulau pusat Zyxcid, 1..9 = pulau proyek).
  * Ditampilkan saat pemain menyapa NPC dengan tombol E.
  */
 export const NPC_QUOTES: string[] = [
-  "Dari pulau ini kamu bisa ke mana saja. Aku cuma penjaga benderanya.",
+  "Pulau ini rumah zyxcid, sang pembuat kepulauan. Dari sini kamu bisa ke mana saja — oh, taman bermainnya baru selesai dibangun.",
   "Skuter-skuter di sini bolak-balik mengantarkan penumpang kampus. Setiap hari, jam yang sama.",
   "Gedung besar itu perpustakaan kanjiku. Masuk saja kalau mau lihat isinya — pintunya tidak pernah dikunci.",
   "Aku menjaga gembok kecil di pintu pulau. Isinya tidak banyak, tapi semuanya penting.",
-  "Pulau ini rumahnya sang pembuat pulau. Aku dititipi jaga benderanya saja.",
   "Setiap dua puluh menit aku ingatkan: alihkan mata, lihat yang jauh. Dua puluh detik saja.",
   "Lima tombol kecil, seribu kombinasi. Aku suka menghitungnya, tidak pernah habis.",
   "Buku besar di pulau ini penuh catatan nilai dan absensi. Kadang angkanya seperti menari.",

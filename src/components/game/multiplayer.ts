@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { PALETTE, PLAYFUL } from "./types";
+import { PALETTE, PLAYFUL, type C4EventMsg, type C4Peer } from "./types";
 import { emoteIconTexture } from "./emotes";
 import type { PartySocket } from "partysocket";
 
@@ -15,6 +15,15 @@ import type { PartySocket } from "partysocket";
  *
  * Tamu lain digambar sebagai burung kertas dengan syal warna acak + label
  * nama samaran ("tamu 07"), diinterpolasi halus ke posisi terakhir dilaporkan.
+ *
+ * Selain posisi & emote, dua mainan pulau pusat ikut disinkronkan:
+ *  - BOLA ("b"): tendangan di-broadcast lengkap dengan posisi + kecepatan —
+ *    fisika bola deterministik, jadi lintasannya sama di semua klien.
+ *  - CONNECT 4 ("c4"): protokol ringan hi/bye/pair/move/reset/state.
+ *    Pemain yang membuka meja C4 mengirim heartbeat "hi" tiap 2 detik;
+ *    dua pemain yang sama-sama membuka meja otomatis BERPASANGAN (AI penghuni
+ *    dinonaktifkan di dua-duanya, warna ditentukan urutan id: id terkecil =
+ *    merah). Lawan yang pergi (bye/timeout) → AI mengambil alih kembali.
  */
 
 // ---------- tuning ----------
@@ -23,6 +32,8 @@ const GHOST_TIMEOUT_MS = 8000; // tamu dianggap pergi bila senyap selama ini
 const GHOST_CAP = 12; // maksimal hantu yang digambar (sisanya hanya dihitung)
 const LERP_K = 10; // kecepatan interpolasi posisi hantu
 const RECV_SAFE = { XY: 400, Y_MIN: -140, Y_MAX: 400 }; // jangkauan wajar posisi (termasuk interior y=-70)
+const C4_HEARTBEAT = 2.0; // detik antar "aku masih di meja C4"
+const C4_PEER_TIMEOUT_MS = 4500; // lawan C4 dianggap pergi bila senyap selama ini
 
 /** 0 = di tanah · 1 = di udara · 2 = melayang (glide) · 3 = dash */
 export type AirState = 0 | 1 | 2 | 3;
@@ -44,6 +55,12 @@ export interface MultiplayerOptions {
   room?: string;
   /** jumlah tamu online (termasuk diri sendiri); 0 = tidak terhubung */
   onPresence?: (count: number) => void;
+  /** tendangan bola dari tamu lain (sinkron fisika bola) */
+  onBall?: (x: number, z: number, vx: number, vz: number) => void;
+  /** pesan Connect 4 dari tamu lain */
+  onC4?: (msg: C4EventMsg) => void;
+  /** daftar tamu yang sedang di meja C4 berubah */
+  onC4Peers?: (peers: C4Peer[]) => void;
 }
 
 interface Ghost {
@@ -145,6 +162,12 @@ export class Multiplayer {
   private dead = false; // menyerah (host tidak tersedia) — mati permanen
   connected = false;
 
+  /** tamu lain yang sedang membuka meja Connect 4 (heartbeat) */
+  private c4Peers = new Map<string, { name: string; lastSeen: number }>();
+  private c4Active = false;
+  private c4BeatT = 0;
+  private c4PeersSig = "";
+
   /** identitas sesi ini — hanya di memori, tanpa localStorage */
   readonly myId: string;
   readonly myName: string;
@@ -236,6 +259,7 @@ export class Multiplayer {
 
     if (t === "bye") {
       this.removeGhost(id);
+      if (this.c4Peers.delete(id)) this.emitC4Peers();
       return;
     }
 
@@ -247,6 +271,23 @@ export class Multiplayer {
           typeof d.e === "string" ? d.e.replace(/[^a-z]/g, "").slice(0, 12) : "";
         if (emoteId) this.playGhostEmote(g, emoteId);
       }
+      return;
+    }
+
+    // ---- tendangan bola dari tamu lain ----
+    if (t === "b") {
+      this.opts.onBall?.(
+        fin(d.x, -50, 50),
+        fin(d.z, -50, 50),
+        fin(d.vx, -20, 20),
+        fin(d.vz, -20, 20)
+      );
+      return;
+    }
+
+    // ---- protokol Connect 4 ----
+    if (t === "c4") {
+      this.handleC4Message(d, id);
       return;
     }
 
@@ -427,6 +468,69 @@ export class Multiplayer {
     this.emitPresence();
   }
 
+  // ================= Connect 4 (protokol lintas klien) =================
+
+  /** Terima pesan c4: perbarui daftar pemain di meja, lalu teruskan ke UI */
+  private handleC4Message(d: Record<string, unknown>, id: string) {
+    const rawSub =
+      typeof d.sub === "string" ? d.sub.replace(/[^a-z]/g, "") : "";
+    if (
+      rawSub !== "hi" && rawSub !== "bye" && rawSub !== "pair" &&
+      rawSub !== "move" && rawSub !== "reset" && rawSub !== "state"
+    ) {
+      return; // sub tidak dikenal — abaikan
+    }
+    const sub: C4EventMsg["sub"] = rawSub;
+    const now = performance.now();
+    if (sub === "hi") {
+      this.c4Peers.set(id, { name: safeName(d.n), lastSeen: now });
+      this.emitC4Peers();
+    } else if (sub === "bye") {
+      if (this.c4Peers.delete(id)) this.emitC4Peers();
+    } else if (this.c4Peers.has(id)) {
+      // pesan aktif dari pemain di meja → segarkan umur heartbeat-nya
+      this.c4Peers.get(id)!.lastSeen = now;
+    }
+
+    // teruskan isinya (klien UI yang memvalidasi & menerapkan)
+    const ev: C4EventMsg = { sub, id };
+    if (sub === "hi") ev.name = safeName(d.n);
+    if (typeof d.red === "string") ev.red = d.red.slice(0, 40);
+    if (typeof d.yellow === "string") ev.yellow = d.yellow.slice(0, 40);
+    if (typeof d.col === "number") ev.col = Math.round(fin(d.col, -1, 7));
+    if (typeof d.p === "number") ev.p = Math.round(fin(d.p, 1, 2)) === 2 ? 2 : 1;
+    if (Array.isArray(d.cells)) ev.cells = d.cells as number[][];
+    if (typeof d.turn === "number") ev.turn = d.turn === 2 ? 2 : 1;
+    if (typeof d.paired === "boolean") ev.paired = d.paired;
+    this.opts.onC4?.(ev);
+  }
+
+  private emitC4Peers(force = false) {
+    const peers: C4Peer[] = [...this.c4Peers.entries()].map(([id, p]) => ({
+      id,
+      name: p.name,
+    }));
+    const sig = peers.map((p) => p.id).join(",");
+    if (!force && sig === this.c4PeersSig) return;
+    this.c4PeersSig = sig;
+    this.opts.onC4Peers?.(peers);
+  }
+
+  /** UI membuka/menutup modal C4 — kirim hi/bye + kelola heartbeat */
+  setC4Active(on: boolean) {
+    if (this.c4Active === on) return;
+    this.c4Active = on;
+    if (on) {
+      this.c4BeatT = 0; // kirim "hi" pertama segera
+    } else {
+      if (this.c4Peers.size > 0) {
+        this.c4Peers.clear();
+        this.emitC4Peers(true);
+      }
+      this.sendC4({ sub: "bye" });
+    }
+  }
+
   private emitPresence() {
     const count = this.connected ? this.ghosts.size + 1 : 0;
     if (count !== this.lastPresence) {
@@ -449,8 +553,25 @@ export class Multiplayer {
       this.send(own);
     }
 
-    // ---- interpolasi & animasi hantu ----
+    // ---- heartbeat & pemangkasan meja Connect 4 ----
     const now = performance.now();
+    if (this.c4Active && this.connected) {
+      this.c4BeatT -= dt;
+      if (this.c4BeatT <= 0) {
+        this.c4BeatT = C4_HEARTBEAT;
+        this.sendC4({ sub: "hi", n: this.myName });
+      }
+      let pruned = false;
+      for (const [pid, p] of this.c4Peers) {
+        if (now - p.lastSeen > C4_PEER_TIMEOUT_MS) {
+          this.c4Peers.delete(pid);
+          pruned = true;
+        }
+      }
+      if (pruned) this.emitC4Peers();
+    }
+
+    // ---- interpolasi & animasi hantu ----
     const k = 1 - Math.exp(-LERP_K * dt);
     for (const g of this.ghosts.values()) {
       if (now - g.lastSeen > GHOST_TIMEOUT_MS) {
@@ -493,28 +614,41 @@ export class Multiplayer {
       // label ikut mengambang lembut
       g.tag.position.y = 1.52 + Math.sin(now * 0.002 + g.phase) * 0.03;
 
-      // ---- emote hantu: ikon + animasi ringan ----
+      // ---- emote hantu: ikon + animasi ringan (dengan amplop naik/turun) ----
       if (g.emoteT > 0) {
         g.emoteT -= dt;
+        // amplop: pose menyatu halus di awal & akhir emote tamu
+        const genv = Math.min(1, Math.min(2.2 - g.emoteT, g.emoteT) / 0.25);
         if (g.emoteIcon) {
           g.emoteIcon.position.y = 1.95 + Math.sin(now * 0.003) * 0.07;
           if (g.emoteT <= 0) g.emoteIcon.visible = false;
         }
-        if (g.emoteId === "spin" || g.emoteId === "glitter") {
-          g.bird.rotation.y += dt * 11; // burung berputar (yaw di-set ulang tiap frame)
-        } else if (g.emoteId === "dance") {
-          g.body.position.x = Math.sin(now * 0.006) * 0.1;
-          g.wingL.rotation.z = -(0.5 + Math.sin(now * 0.012) * 0.6);
-          g.wingR.rotation.z = 0.5 + Math.sin(now * 0.012 + Math.PI) * 0.6;
-        } else if (g.emoteId === "hearts") {
-          g.body.position.y = 0.52 + Math.abs(Math.sin(now * 0.004)) * 0.16;
-        } else if (g.emoteId === "sit") {
-          g.body.position.y = 0.36;
-          g.legL.rotation.x = 1.2;
-          g.legR.rotation.x = 1.2;
-        } else if (g.emoteId === "wave") {
-          g.wingL.rotation.z = -(1.15 + Math.sin(now * 0.009) * 0.3);
-          g.wingR.rotation.z = 1.15 - Math.sin(now * 0.009) * 0.3;
+        if (g.emoteId === "spin") {
+          const p = 1 - g.emoteT / 2.2;
+          const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+          g.bird.rotation.y = g.yaw + e * Math.PI * 4;
+        } else if (g.emoteId === "glitter") {
+          const p = 1 - g.emoteT / 2.2;
+          const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+          g.bird.rotation.y = g.yaw + e * Math.PI * 6;
+          g.body.position.y = 0.52 + Math.sin(p * Math.PI) * 0.35;
+        } else {
+          g.bird.rotation.y = g.yaw;
+          if (g.emoteId === "dance") {
+            g.body.position.x = Math.sin(now * 0.006) * 0.1 * genv;
+            g.body.position.y = 0.52 + Math.abs(Math.sin(now * 0.006)) * 0.07 * genv;
+            g.wingL.rotation.z = -(0.5 + Math.sin(now * 0.012) * 0.6) * genv;
+            g.wingR.rotation.z = (0.5 + Math.sin(now * 0.012 + Math.PI) * 0.6) * genv;
+          } else if (g.emoteId === "hearts") {
+            g.body.position.y = 0.52 + Math.abs(Math.sin(now * 0.004)) * 0.16 * genv;
+          } else if (g.emoteId === "sit") {
+            g.body.position.y = 0.52 - 0.18 * genv;
+            g.legL.rotation.x = 1.2 * genv;
+            g.legR.rotation.x = 1.2 * genv;
+          } else if (g.emoteId === "wave") {
+            g.wingL.rotation.z = -(1.15 + Math.sin(now * 0.009) * 0.3) * genv;
+            g.wingR.rotation.z = (1.15 - Math.sin(now * 0.009) * 0.3) * genv;
+          }
         }
       } else {
         // pulihkan pose yang pernah diubah emote (badan bergeser goyang dansa)
@@ -558,6 +692,34 @@ export class Multiplayer {
     }
   }
 
+  /** Broadcast tendangan bola (posisi + kecepatan) ke tamu lain */
+  sendBall(x: number, z: number, vx: number, vz: number) {
+    if (!this.connected || !this.socket) return;
+    const msg = JSON.stringify({
+      t: "b",
+      id: this.myId,
+      x: +x.toFixed(2),
+      z: +z.toFixed(2),
+      vx: +vx.toFixed(2),
+      vz: +vz.toFixed(2),
+    });
+    try {
+      this.socket.send(msg);
+    } catch {
+      /* diam saja */
+    }
+  }
+
+  /** Kirim pesan protokol Connect 4 (sub + isinya; id ditambah otomatis) */
+  sendC4(extra: Record<string, unknown>) {
+    if (!this.connected || !this.socket || this.disposed) return;
+    try {
+      this.socket.send(JSON.stringify({ t: "c4", id: this.myId, ...extra }));
+    } catch {
+      /* diam saja */
+    }
+  }
+
   // ================= daur hidup =================
 
   attach(scene: THREE.Scene) {
@@ -579,6 +741,11 @@ export class Multiplayer {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.c4Active) {
+      this.c4Active = false;
+      this.c4Peers.clear();
+      this.emitC4Peers(true);
+    }
     try {
       this.socket?.send(JSON.stringify({ t: "bye", id: this.myId }));
     } catch {

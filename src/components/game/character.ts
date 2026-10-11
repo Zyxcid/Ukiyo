@@ -163,6 +163,18 @@ export function createPaperBird(scene: THREE.Scene): CharacterHandle {
   let emoteT = 0;
   let emoteDur = 1;
 
+  // ---- utilitas gerak emote: easing + amplop naik/turun ----
+  const easeInOutCubic = (p: number) =>
+    p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+  const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+  /** amplop: 0 → 1 di awal, tahan 1 di tengah, → 0 di akhir (pose menyatu
+   *  halus dari & kembali ke pose netral — tidak ada lagi pose yang "menjumput") */
+  const envelope = (p: number, rampIn = 0.16, rampOut = 0.2) =>
+    clamp01(Math.min(p / rampIn, (1 - p) / rampOut));
+  /** amplop khusus pose yang harus "tinggal" lama lalu pulih (mis. duduk) */
+  const envelopeHold = (p: number, rampIn = 0.2, rampOut = 0.14) =>
+    clamp01(Math.min(p / rampIn, (1 - p) / rampOut));
+
   return {
     group,
     shadow,
@@ -250,68 +262,100 @@ export function createPaperBird(scene: THREE.Scene): CharacterHandle {
         emoteId = null;
         body.position.x = 0;
         flipGroup.rotation.y = 0;
+        flipGroup.position.y = 0;
+        body.rotation.z = 0;
         for (const e of eyes) e.scale.y = 1;
         legL.rotation.x = 0;
         legR.rotation.x = 0;
       }
       if (emoteId && emoteT > 0) {
         const p = 1 - emoteT / emoteDur; // progres 0..1
+        const env = envelope(p);
+        const hold = envelopeHold(p);
         switch (emoteId) {
           case "wave": {
-            // dua sayap terangkat, mengibas bergantian
-            const wig = Math.sin(t * 9) * 0.28;
-            wingL.rotation.z = -(1.15 + wig);
-            wingR.rotation.z = 1.15 - wig;
-            body.rotation.z = Math.sin(t * 4.5) * 0.08;
+            // dua sayap terangkat perlahan dulu, lalu mengibas bergantian
+            const wig = Math.sin(t * 9) * 0.3;
+            wingL.rotation.z = -(1.15 + wig) * env;
+            wingR.rotation.z = (1.15 - wig) * env;
+            body.rotation.z = Math.sin(t * 4.5) * 0.08 * env;
+            body.position.y = 0.52 + Math.sin(t * 4.5) * 0.025 * env;
+            ahoge.rotation.z = -0.28 + Math.sin(t * 9) * 0.18 * env;
             break;
           }
           case "dance": {
-            body.position.x = Math.sin(t * 6.3) * 0.1;
-            body.position.y = 0.52 + Math.abs(Math.sin(t * 6.3)) * 0.07;
-            wingL.rotation.z = -(0.5 + Math.sin(t * 12) * 0.6);
-            wingR.rotation.z = 0.5 + Math.sin(t * 12 + Math.PI) * 0.6;
-            legL.rotation.x = Math.sin(t * 12) * 0.55;
-            legR.rotation.x = -Math.sin(t * 12) * 0.55;
-            ahoge.rotation.z = -0.28 + Math.sin(t * 12) * 0.4;
+            // goyang pinggul + kepak selang-seling + kaki menepuk
+            const beat = Math.sin(t * 6.3);
+            const flap = Math.sin(t * 12);
+            body.position.x = beat * 0.11 * env;
+            body.position.y = 0.52 + Math.abs(beat) * 0.075 * env;
+            body.rotation.z = beat * 0.13 * env;
+            wingL.rotation.z = -(0.55 + flap * 0.62) * env;
+            wingR.rotation.z = (0.55 - flap * 0.62) * env;
+            legL.rotation.x = flap * 0.55 * env;
+            legR.rotation.x = -flap * 0.55 * env;
+            ahoge.rotation.z = -0.28 + flap * 0.4 * env;
             break;
           }
           case "spin": {
-            flipGroup.rotation.y = p * Math.PI * 4; // dua putaran penuh
-            wingL.rotation.z = -1.0;
-            wingR.rotation.z = 1.0;
+            // dua putaran penuh dengan easing (mulai-pelan → cepat → berhenti
+            // mulus) + lompatan kecil di tengah putaran
+            flipGroup.rotation.y = easeInOutCubic(p) * Math.PI * 4;
+            flipGroup.position.y = Math.sin(p * Math.PI) * 0.5;
+            wingL.rotation.z = -1.05 * env;
+            wingR.rotation.z = 1.05 * env;
             break;
           }
           case "flip": {
-            flipGroup.rotation.x = p * Math.PI * 4; // salto ganda
+            // salto ganda sebagai LOMPATAN sungguhan: busur naik-turun,
+            // rotasi mengikuti busurnya (cepat di puncak), kaki melipat
+            flipGroup.rotation.x = easeInOutCubic(p) * Math.PI * 4;
+            flipGroup.position.y = Math.sin(p * Math.PI) * 0.62;
+            wingL.rotation.z = -0.95 * env;
+            wingR.rotation.z = 0.95 * env;
+            legL.rotation.x = 0.9 * Math.sin(p * Math.PI);
+            legR.rotation.x = 0.9 * Math.sin(p * Math.PI);
             break;
           }
           case "sit": {
-            body.position.y = 0.34;
+            // merosot perlahan ke pose duduk, menahan, lalu bangun mulus
+            const q = 1 - Math.pow(1 - hold, 3); // ease-out ke pose duduk
+            body.position.y = 0.52 + (0.34 - 0.52) * q;
             body.scale.set(
-              bodyScale.x * 1.12,
-              bodyScale.y * 0.74,
-              bodyScale.z * 1.12
+              bodyScale.x * (1 + 0.12 * q),
+              bodyScale.y * (1 - 0.26 * q) * idleBreath,
+              bodyScale.z * (1 + 0.12 * q)
             );
-            legL.rotation.x = 1.25;
-            legR.rotation.x = 1.25;
-            wingL.rotation.z = -0.55;
-            wingR.rotation.z = 0.55;
-            for (const e of eyes) e.scale.y = 0.1; // merem santai
-            ahoge.rotation.z = -0.05 + Math.sin(t * 1.6) * 0.06;
+            legL.rotation.x = 1.25 * q;
+            legR.rotation.x = 1.25 * q;
+            wingL.rotation.z = -0.55 * q;
+            wingR.rotation.z = 0.55 * q;
+            for (const e of eyes) e.scale.y = 1 - 0.9 * q; // merem santai
+            ahoge.rotation.z = -0.05 + Math.sin(t * 1.6) * 0.06 * q;
             break;
           }
           case "hearts": {
-            body.position.y = 0.52 + Math.abs(Math.sin(t * 3.6)) * 0.16;
-            wingL.rotation.z = -(0.4 + Math.sin(t * 7) * 0.35);
-            wingR.rotation.z = 0.4 + Math.sin(t * 7) * 0.35;
-            body.rotation.z = Math.sin(t * 3.6) * 0.12;
+            // lompat-lompat gembira dengan squash & stretch
+            const hop = Math.abs(Math.sin(t * 3.6));
+            body.position.y = 0.52 + hop * 0.17 * env;
+            body.scale.set(
+              bodyScale.x * (1 + 0.06 * (1 - hop) * env),
+              bodyScale.y * (1 - 0.1 * (1 - hop) * env + 0.12 * hop * env) * idleBreath,
+              bodyScale.z * (1 + 0.06 * (1 - hop) * env)
+            );
+            wingL.rotation.z = -(0.4 + Math.sin(t * 7) * 0.35) * env;
+            wingR.rotation.z = (0.4 + Math.sin(t * 7) * 0.35) * env;
+            body.rotation.z = Math.sin(t * 3.6) * 0.12 * env;
             break;
           }
           case "glitter": {
-            flipGroup.rotation.y = p * Math.PI * 6;
-            wingL.rotation.z = -1.3;
-            wingR.rotation.z = 1.3;
-            body.position.y = 0.52 + Math.abs(Math.sin(t * 10)) * 0.1;
+            // berputar tiga kali sambil naik pelan + terbang melayang turun
+            flipGroup.rotation.y = easeInOutCubic(p) * Math.PI * 6;
+            flipGroup.position.y = Math.sin(p * Math.PI) * 0.42;
+            wingL.rotation.z = -1.3 * env;
+            wingR.rotation.z = 1.3 * env;
+            body.position.y = 0.52 + Math.abs(Math.sin(t * 10)) * 0.1 * env;
+            ahoge.rotation.z = -0.28 + Math.sin(t * 10) * 0.3 * env;
             break;
           }
         }

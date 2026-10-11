@@ -14,6 +14,21 @@ import {
   type InsideStation,
 } from "./interior";
 import {
+  createPlayground,
+  BADGES,
+  type PlaygroundHandle,
+  type ToyStation,
+} from "./playground";
+import {
+  loadStars,
+  saveStars,
+  loadVisited,
+  saveVisited,
+  loadBadges,
+  saveBadges,
+} from "./progress";
+import type { DioramaBlocker } from "./structures";
+import {
   EMOTES,
   emoteById,
   emoteIconTexture,
@@ -30,7 +45,7 @@ import {
   type EngineCallbacks,
   type PlayerAction,
 } from "./types";
-import { NPC_QUOTES, type Project } from "@/lib/projects";
+import { GITHUB_PROFILE, NPC_QUOTES, type Project } from "@/lib/projects";
 
 // ---------- tuning fisika ----------
 const GRAVITY = 26;
@@ -48,6 +63,19 @@ const EDGE_MARGIN = 0.3;
 const TALK_RANGE = 2.3;
 const TALK_DURATION = 6.0;
 const DOOR_RANGE = 2.1;
+
+// ---- taman bermain ----
+const TRAMPOLINE_V = 15.5;
+const PLAYER_R = 0.42;
+const SWING_BADGE_T = 6;
+const SWING_AUTO_EXIT = 12;
+const SLIDE_DUR = 1.35;
+const TOY_LABEL: Record<ToyStation["kind"], string> = {
+  swing: "naik ayunan",
+  slide: "luncur perosotan",
+  c4: "main Connect 4",
+  github: "buka github zyxcid",
+};
 
 export class GameEngine {
   private renderer!: THREE.WebGLRenderer;
@@ -117,6 +145,32 @@ export class GameEngine {
   private firedUnlocks = new Set<string>();
   private quizStreak = 0;
 
+  // taman bermain + penghalang bangunan + progres lintas reload
+  private playground!: PlaygroundHandle;
+  private blockers: Array<{
+    /** index pulau pemilik bangunan */
+    island: number;
+    cx: number;
+    cz: number;
+    hx: number;
+    hz: number;
+    top: number;
+    /** posisi & rotasi dunia pulau (dihitung sekali — pulau hanya mengambang di Y) */
+    wx: number;
+    wz: number;
+    rot: number;
+    /** Y dunia batas atas blok */
+    blockTopY: number;
+  }> = [];
+  private ride: { t: number } | null = null;
+  private slideT = -1;
+  private slides = 0;
+  private trampCD = 0;
+  private nearToy: ToyStation | null = null;
+  private nearToyKey: string | null = null;
+  private badges = new Set<string>();
+  private savedStarIdx: number[] = [];
+
   // dash state
   private dashT = 0;
   private dashCD = 0;
@@ -143,7 +197,35 @@ export class GameEngine {
     this.character = createPaperBird(this.scene);
     this.stars = createStars(this.scene, this.islands.starSpots);
     this.effects = createEffects(this.scene);
-    this.npcs = createNpcs(this.scene, this.islands.handles);
+
+    // ---- penghalang bangunan (pemain & NPC tidak menembus gedung) ----
+    const blockersByIsland = new Map<number, DioramaBlocker[]>();
+    this.islands.handles.forEach((h) => {
+      const bl = h.diorama?.blockers;
+      if (!bl?.length) return;
+      blockersByIsland.set(h.index, bl);
+      for (const b of bl) {
+        this.blockers.push({
+          island: h.index,
+          cx: b.cx,
+          cz: b.cz,
+          hx: b.hx,
+          hz: b.hz,
+          top: b.top,
+          wx: h.group.position.x,
+          wz: h.group.position.z,
+          rot: h.group.rotation.y,
+          blockTopY: h.group.position.y + b.top,
+        });
+      }
+    });
+
+    this.npcs = createNpcs(this.scene, this.islands.handles, blockersByIsland);
+
+    // ---- taman bermain di pulau pusat ----
+    this.playground = createPlayground(this.islands.handles[0].group);
+    // undakan perosotan ikut daftar collider umum (bisa dipijak/diinjak)
+    for (const s of this.playground.steps) this.islands.colliders.push(s.c);
 
     // ---- interior 3D gedung proyek (saat ini: Kanji Hall) ----
     projects.forEach((p, i) => {
@@ -161,6 +243,30 @@ export class GameEngine {
     this.goldScarf = loadGoldScarf();
     if (this.goldScarf) this.character.setScarfGold(true);
 
+    // ---- progres lintas reload: bintang, kunjungan, lencana ----
+    this.badges = new Set(loadBadges());
+    this.savedStarIdx = loadStars().filter(
+      (i) => i >= 0 && i < this.stars.stars.length
+    );
+    for (const i of this.savedStarIdx) {
+      const st = this.stars.stars[i];
+      if (!st.taken) {
+        st.taken = true;
+        st.sprite.visible = false;
+        this.collected += 1;
+      }
+    }
+    if (this.collected > this.maxStarsSaved) {
+      this.maxStarsSaved = this.collected;
+      saveMaxStars(this.collected);
+    }
+    for (const i of loadVisited()) {
+      if (i >= 1 && i < this.islands.handles.length && !this.visited.has(i)) {
+        this.visited.add(i);
+        this.islands.setVisited(i);
+      }
+    }
+
     this.input = new InputManager(container);
     this.input.camDist = 11;
     this.input.onTalkKey = () => this.tryTalk();
@@ -174,6 +280,11 @@ export class GameEngine {
       this.multiplayer = new Multiplayer({
         host: opts.multiplayerHost,
         onPresence: (n) => this.cb.onPresence?.(n),
+        // tendangan bola dari tamu → terima ke fisika bola lokal
+        onBall: (x, z, vx, vz) => this.playground.setBallState(x, z, vx, vz),
+        // protokol Connect 4 → diteruskan ke UI (state permainan ada di sana)
+        onC4: (msg) => this.cb.onC4Event?.(msg),
+        onC4Peers: (peers) => this.cb.onC4Peers?.(peers),
       });
       this.multiplayer.attach(this.scene);
     }
@@ -181,7 +292,7 @@ export class GameEngine {
     this.pos.copy(this.islands.spawnPoint);
     this.character.group.position.copy(this.pos);
     this.lastTime = performance.now() / 1000;
-    this.cb.onStar(0, this.stars.total); // info total ke UI
+    this.cb.onStar(this.collected, this.stars.total); // info total (+yang tersimpan) ke UI
 
     this.updateCamera(0, true);
     this.onResize();
@@ -235,6 +346,8 @@ export class GameEngine {
     this.updateBubblePos();
     this.updateNpcProximity();
     this.updateDoorProximity();
+    this.updatePlayground(dt);
+    this.updateToyProximity();
     if (this.talkTimer > 0) {
       this.talkTimer -= dt;
       if (this.talkTimer <= 0) {
@@ -280,6 +393,17 @@ export class GameEngine {
 
   // ================= fisika =================
   private physics(dt: number) {
+    // ---- sedang mengayun di ayunan: kinematik penuh ----
+    if (this.ride) {
+      this.updateSwingRide(dt);
+      return;
+    }
+    // ---- sedang meluncur di perosotan: kinematik penuh ----
+    if (this.slideT >= 0) {
+      this.updateSlide(dt);
+      return;
+    }
+
     // gerak terkunci selama emote bermain
     const move =
       this.inputEnabled && this.emoteT <= 0 ? this.input.getMove() : { x: 0, y: 0 };
@@ -379,6 +503,13 @@ export class GameEngine {
       return;
     }
 
+    // ---- dinding bangunan: dorong keluar supaya tidak menembus ----
+    this.resolveBlockers();
+
+    // ---- trampolin: injak / mendarat → pantul tinggi ----
+    this.trampCD = Math.max(0, this.trampCD - dt);
+    this.checkTrampoline();
+
     // ---- tetap menempel platform yang dipijak (pulau mengambang) ----
     if (this.grounded) {
       const col = this.islands.colliders[this.groundCollider];
@@ -438,7 +569,10 @@ export class GameEngine {
       this.sfx.collect(this.combo);
       this.thump(0.18, 45);
       this.cb.onStar(this.collected, this.stars.total);
-      // catat pencapaian tertinggi (pembuka emote permanen)
+      // catat pencapaian tertinggi (pembuka emote permanen) + simpan index
+      // bintang supaya progres tidak hilang saat reload
+      this.savedStarIdx.push(si);
+      saveStars(this.savedStarIdx);
       if (this.collected > this.maxStarsSaved) {
         this.maxStarsSaved = this.collected;
         saveMaxStars(this.collected);
@@ -531,6 +665,7 @@ export class GameEngine {
       this.islands.setVisited(islandIndex);
       this.sfx.visit();
       this.cb.onVisit(islandIndex);
+      saveVisited([...this.visited]); // bendera tetap naik setelah reload
     }
   }
 
@@ -834,6 +969,36 @@ export class GameEngine {
       this.enterBuilding(this.nearDoorIsland);
       return;
     }
+
+    // ---- sedang mengayun: E = turun ----
+    if (this.ride) {
+      this.endSwingRide(true);
+      return;
+    }
+
+    // ---- mainan taman bermain ----
+    if (this.nearToy) {
+      if (this.nearToy.kind === "swing") {
+        this.rideSwing();
+      } else if (this.nearToy.kind === "slide") {
+        this.startSlide();
+      } else if (this.nearToy.kind === "github") {
+        // gerbang GitHub: buka profil di tab baru (dipicu gesture E/tap —
+        // window.open aman dari pemblokir pop-up)
+        this.sfx.visit();
+        this.thump(0.25, 60);
+        try {
+          window.open(GITHUB_PROFILE, "_blank", "noopener,noreferrer");
+        } catch {
+          // pemblokir pop-up — diam saja, hint tetap ada di UI
+        }
+      } else {
+        this.sfx.talk();
+        this.cb.onOpenConnect4?.();
+      }
+      return;
+    }
+
     const npc = this.findNearNpc();
     if (!npc) return;
     npc.excite();
@@ -989,9 +1154,235 @@ export class GameEngine {
     }
   }
 
+  // ================= taman bermain =================
+  /** Loop taman bermain: fisika bola + denyut trampolin + sinkron ketinggian */
+  private updatePlayground(dt: number) {
+    const hubY = this.islands.handles[0].group.position.y;
+    const speed = Math.hypot(this.vel.x, this.vel.z);
+    const kicked = this.playground.update(dt, this.elapsed, hubY, {
+      x: this.pos.x,
+      z: this.pos.z,
+      speed,
+    });
+    if (kicked) {
+      this.sfx.boing();
+      this.thump(0.22, 55);
+      // broadcast tendangan (posisi + kecepatan) supaya bola tamu lain sama
+      const b = this.playground.getBallState();
+      this.multiplayer?.sendBall(b.x, b.z, b.vx, b.vz);
+      if (this.playground.kicks >= 15) this.awardBadge("kicker");
+    }
+  }
+
+  /** Mainan mana yang sedang dekat pemain (untuk hint E / tombol sentuh) */
+  private updateToyProximity() {
+    let best: ToyStation | null = null;
+    let bestD = Infinity;
+    if (this.inputEnabled && this.ride === null && this.slideT < 0) {
+      const hubY = this.islands.handles[0].group.position.y;
+      for (const st of this.playground.stations) {
+        const dx = this.pos.x - st.x;
+        const dz = this.pos.z - st.z;
+        const dy = this.pos.y - hubY;
+        const d = Math.hypot(dx, dz);
+        if (d < st.r && d < bestD) {
+          if (st.kind === "slide" && dy < 1.35) continue; // harus di platform atas
+          if (st.kind === "swing" && dy > 2.4) continue; // bukan saat melintas di udara
+          best = st;
+          bestD = d;
+        }
+      }
+    }
+    const key = best ? best.kind : null;
+    if (key !== this.nearToyKey) {
+      this.nearToy = best;
+      this.nearToyKey = key;
+      this.cb.onToyNear?.(
+        best ? { kind: best.kind, label: TOY_LABEL[best.kind] } : null
+      );
+    }
+  }
+
+  /** Dorong pemain keluar dari kotak bangunan (AABB lokal pulau) */
+  private resolveBlockers() {
+    for (const b of this.blockers) {
+      if (this.pos.y > b.blockTopY) continue; // melompati atap — biarkan
+      const dx = this.pos.x - b.wx;
+      const dz = this.pos.z - b.wz;
+      const c = Math.cos(b.rot);
+      const s = Math.sin(b.rot);
+      // dunia → lokal pulau
+      const lx = c * dx - s * dz;
+      const lz = s * dx + c * dz;
+      const ox = b.hx + PLAYER_R - Math.abs(lx - b.cx);
+      if (ox <= 0) continue;
+      const oz = b.hz + PLAYER_R - Math.abs(lz - b.cz);
+      if (oz <= 0) continue;
+      // dorong keluar lewat sisi tertipis
+      let nlx = lx;
+      let nlz = lz;
+      if (ox < oz) {
+        nlx = b.cx + (lx >= b.cx ? 1 : -1) * (b.hx + PLAYER_R);
+      } else {
+        nlz = b.cz + (lz >= b.cz ? 1 : -1) * (b.hz + PLAYER_R);
+      }
+      // lokal pulau → dunia
+      this.pos.x = b.wx + c * nlx + s * nlz;
+      this.pos.z = b.wz - s * nlx + c * nlz;
+    }
+  }
+
+  /** Pantulan trampolin (berlaku saat jatuh ke atasnya atau berjalan menimpanya) */
+  private checkTrampoline() {
+    if (this.trampCD > 0) return;
+    const tr = this.playground.tramp;
+    const dx = this.pos.x - tr.x;
+    const dz = this.pos.z - tr.z;
+    if (dx * dx + dz * dz > tr.r * tr.r) return;
+    if (this.pos.y > tr.topY + 0.2 || this.pos.y < tr.topY - 1.4) return;
+    if (this.dashT > 0) return; // dash tetap melesat, tidak terganggu
+    this.pos.y = tr.topY;
+    this.vel.y = TRAMPOLINE_V;
+    this.grounded = false;
+    this.coyote = 0;
+    this.trampCD = 0.3;
+    this.playground.bounces += 1;
+    this.playground.trampPulse();
+    this.sfx.boing();
+    this.thump(0.3, 70);
+    this.effects.dust(this.pos.x, this.pos.y, this.pos.z, 3);
+    if (this.playground.bounces >= 10) this.awardBadge("bouncer");
+  }
+
+  /** Kinematik mengayun: posisi mengikuti bandul, SPASI = lompat dengan momentum */
+  private updateSwingRide(dt: number) {
+    const ride = this.ride;
+    if (!ride) return;
+    ride.t += dt;
+    const sw = this.playground.swing;
+    const hubY = this.islands.handles[0].group.position.y;
+    const A = 0.8;
+    const W = 4.0;
+    const th = A * Math.sin(W * ride.t);
+    const dth = A * W * Math.cos(W * ride.t);
+    this.playground.swingAngle(th);
+    this.pos.set(
+      sw.x + Math.sin(th) * sw.L,
+      hubY + sw.topY - Math.cos(th) * sw.L + 0.12,
+      sw.z
+    );
+    // kecepatan (untuk animasi kaki + broadcast ke tamu lain)
+    this.vel.set(
+      Math.cos(th) * dth * sw.L,
+      Math.sin(th) * dth * sw.L,
+      0
+    );
+
+    // lompat = melompat dari ayunan membawa kecepatan ayunannya
+    if (this.inputEnabled && this.input.peekJump()) {
+      this.input.consumeJump();
+      this.endSwingRide(false);
+      this.vel.set(THREE.MathUtils.clamp(this.vel.x, -8, 8), 8.6, 0);
+      this.fireAction("jump");
+      this.sfx.jump();
+      this.thump(0.25, 60);
+      return;
+    }
+    if (ride.t >= SWING_BADGE_T) this.awardBadge("rider");
+    if (ride.t >= SWING_AUTO_EXIT) this.endSwingRide(true);
+    this.character.group.position.copy(this.pos);
+  }
+
+  /** Turun dari ayunan (gentle = pelan tanpa lompatan) */
+  private endSwingRide(gentle: boolean) {
+    if (!this.ride) return;
+    this.playground.swingAngle(null);
+    this.ride = null;
+    this.grounded = false;
+    this.coyote = 0;
+    this.airJumps = 1;
+    if (gentle) {
+      this.vel.multiplyScalar(0.25);
+      this.vel.y = 1.5;
+    }
+  }
+
+  /** Mulai mengayun (dipanggil E dekat kursi ayunan) */
+  rideSwing() {
+    if (this.ride || this.slideT >= 0) return;
+    this.ride = { t: 0 };
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.talkNpc = null;
+    this.talkTimer = 0;
+    this.sfx.emote();
+    this.thump(0.2, 50);
+  }
+
+  /** Kinematik luncuran perosotan dari platform atas sampai bawah */
+  private updateSlide(dt: number) {
+    this.slideT += dt;
+    const sl = this.playground.slide;
+    const p = Math.min(1, this.slideT / SLIDE_DUR);
+    const pe = p * (0.35 + 0.65 * p); // mulai pelan, makin cepat
+    this.pos.set(
+      sl.top.x + (sl.bottom.x - sl.top.x) * pe,
+      sl.top.y + (sl.bottom.y - sl.top.y) * pe,
+      sl.top.z + (sl.bottom.z - sl.top.z) * pe
+    );
+    const dpe = (0.35 + 1.3 * p) / SLIDE_DUR;
+    this.vel.set(
+      (sl.bottom.x - sl.top.x) * dpe,
+      (sl.bottom.y - sl.top.y) * dpe,
+      (sl.bottom.z - sl.top.z) * dpe
+    );
+    if (p >= 1) {
+      this.slideT = -1;
+      this.slides += 1;
+      const dirX = sl.bottom.x - sl.top.x;
+      const dirZ = sl.bottom.z - sl.top.z;
+      const dl = Math.hypot(dirX, dirZ) || 1;
+      this.vel.set((dirX / dl) * 5.2, 2.4, (dirZ / dl) * 5.2);
+      this.grounded = false;
+      this.airJumps = 1;
+      this.effects.dust(this.pos.x, this.pos.y, this.pos.z, 5);
+      this.sfx.land();
+      this.thump(0.35, 80);
+      if (this.slides >= 2) this.awardBadge("slider");
+    }
+    this.character.group.position.copy(this.pos);
+  }
+
+  /** Mulai meluncur (dipanggil E di platform atas perosotan) */
+  startSlide() {
+    if (this.slideT >= 0 || this.ride) return;
+    this.slideT = 0;
+    this.talkNpc = null;
+    this.talkTimer = 0;
+    this.sfx.dash(); // whoosh luncur
+    this.thump(0.2, 60);
+  }
+
+  /** Buka lencana taman bermain (kolektibel) — return true bila baru terbuka */
+  awardBadge(id: string): boolean {
+    if (this.badges.has(id)) return false;
+    const def = BADGES.find((b) => b.id === id);
+    if (!def) return false;
+    this.badges.add(id);
+    saveBadges([...this.badges]);
+    this.sfx.milestone();
+    this.effects.confetti(this.pos.x, this.pos.y + 0.8, this.pos.z);
+    this.thump(0.4, 90);
+    this.cb.onBadgeUnlocked?.(id);
+    return true;
+  }
+
   // ================= API publik =================
   /** Teleport karakter ke pulau proyek (untuk daftar proyek) */
   teleportTo(index: number) {
+    // bila sedang mengayun/meluncur: hentikan dulu
+    if (this.ride) this.endSwingRide(true);
+    this.slideT = -1;
     // bila sedang di dalam gedung: keluar dulu (posisi kembali diabaikan)
     if (this.insideIsland !== null) this.exitBuilding();
     const handle = this.islands.handles[index];
@@ -1027,6 +1418,40 @@ export class GameEngine {
     this.character.setScarfGold(on);
   }
 
+  /** Sinkronkan papan Connect 4 3D dengan state permainan di UI */
+  setConnect4Board(cells: number[][]) {
+    this.playground.setBoard(cells);
+  }
+
+  /** UI membuka/menutup modal Connect 4 → heartbeat "aku di meja" + bye */
+  setC4Active(on: boolean) {
+    this.multiplayer?.setC4Active(on);
+  }
+
+  /** Kirim pesan protokol Connect 4 ke tamu lain (pair/move/reset/state) */
+  sendC4Message(extra: Record<string, unknown>) {
+    this.multiplayer?.sendC4(extra);
+  }
+
+  /** Identitas multiplayer sesi ini (untuk penentuan warna & nama lawan) */
+  getMpInfo(): { id: string; name: string; connected: boolean } | null {
+    return this.multiplayer
+      ? { id: this.multiplayer.myId, name: this.multiplayer.myName, connected: this.multiplayer.connected }
+      : null;
+  }
+
+  /** HANYA untuk pengujian otomatis — warp langsung ke titik dunia. */
+  debugWarp(x: number, z: number, y?: number) {
+    if (this.insideIsland !== null) this.exitBuilding();
+    if (this.ride) this.endSwingRide(true);
+    this.slideT = -1;
+    const hubY = this.islands.handles[0].group.position.y;
+    this.pos.set(x, y ?? hubY + 2.2, z);
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.updateCamera(0, true);
+  }
+
   /** State internal untuk debugging/pengujian (dipakai via window hook) */
   getDebugState() {
     return {
@@ -1050,6 +1475,33 @@ export class GameEngine {
       maxStarsSaved: this.maxStarsSaved,
       goldScarf: this.goldScarf,
       visited: this.visited.size,
+      // taman bermain & progres
+      toyNear: this.nearToy?.kind ?? null,
+      ride: this.ride ? Math.round(this.ride.t * 100) / 100 : null,
+      slideT: this.slideT,
+      slides: this.slides,
+      bounces: this.playground?.bounces ?? 0,
+      kicks: this.playground?.kicks ?? 0,
+      badges: [...this.badges],
+      ball: this.playground
+        ? {
+            x: Math.round(this.playground.ball.x * 10) / 10,
+            z: Math.round(this.playground.ball.z * 10) / 10,
+          }
+        : null,
+      tramp: this.playground
+        ? { x: this.playground.tramp.x, z: this.playground.tramp.z, topY: Math.round(this.playground.tramp.topY * 100) / 100 }
+        : null,
+      // penghalang bangunan (OBB dunia) — dipakai verifikasi otomatis
+      blockersWorld: this.blockers.map((b) => ({
+        wx: b.wx,
+        wz: b.wz,
+        rot: b.rot,
+        cx: b.cx,
+        cz: b.cz,
+        hx: b.hx,
+        hz: b.hz,
+      })),
       mp: this.multiplayer ? this.multiplayer.getDebug() : null,
     };
   }
@@ -1076,6 +1528,7 @@ export class GameEngine {
     this.character.dispose();
     for (const interior of this.interiors.values()) interior.dispose();
     this.interiors.clear();
+    this.playground?.dispose();
     if (this.emoteIcon) {
       this.scene.remove(this.emoteIcon);
       (this.emoteIcon.material as THREE.SpriteMaterial).dispose();

@@ -126,6 +126,11 @@ export class Sfx {
     this.tone(600, 0.09, "square", 0.04, 760);
     this.tone(880, 0.12, "square", 0.04, 1040, 0.07);
   }
+  /** trampolin / tendangan bola: pegas melengkung ke atas */
+  boing() {
+    this.tone(170, 0.3, "triangle", 0.06, 540);
+    this.tone(340, 0.2, "sine", 0.045, 720, 0.06);
+  }
   milestone() {
     const notes = [523, 659, 784, 1047];
     notes.forEach((f, i) => this.tone(f, 0.16, "triangle", 0.05, undefined, i * 0.09));

@@ -14,7 +14,8 @@ export interface IslandHandle {
   flagRaised: boolean;
   bobPhase: number;
   baseY: number;
-  label: THREE.Sprite;
+  /** label nama pulau — null di pulau pusat (diganti gerbang GitHub) */
+  label: THREE.Sprite | null;
 }
 
 /** PRNG deterministik supaya layout kepulauan selalu sama */
@@ -60,7 +61,9 @@ export function createIslands(scene: THREE.Scene, projects: Project[]): IslandsR
   const starSpots: THREE.Vector3[] = [];
 
   // ================= penempatan =================
-  const HUB_R = 7;
+  // Pulau pusat sengaja LUAS (taman bermain + gerbang GitHub butuh ruang):
+  // ayunan/trampolin/perosotan/meja C4 tidak lagi saling dempet di tepi.
+  const HUB_R = 9.2;
   interface Node {
     x: number;
     y: number;
@@ -84,7 +87,7 @@ export function createIslands(scene: THREE.Scene, projects: Project[]): IslandsR
   }
 
   // ================= label sprite paper-ink =================
-  const makeLabel = (name: string, accent: string, isHome: boolean) => {
+  const makeLabel = (name: string, accent: string) => {
     const canvas = document.createElement("canvas");
     canvas.width = 560;
     canvas.height = 160;
@@ -104,32 +107,14 @@ export function createIslands(scene: THREE.Scene, projects: Project[]): IslandsR
     ctx.roundRect(8, 8, 26, 144, [14, 0, 0, 14]);
     ctx.fill();
 
-    if (isHome) {
-      ctx.save();
-      ctx.translate(64, 80);
-      ctx.fillStyle = "#F7B32B";
-      ctx.strokeStyle = "#1C1813";
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      for (let i = 0; i < 5; i++) {
-        const ang = (Math.PI * 2 * i) / 5 - Math.PI / 2;
-        const b = ang + Math.PI / 5;
-        ctx.lineTo(Math.cos(ang) * 20, Math.sin(ang) * 20);
-        ctx.lineTo(Math.cos(b) * 9, Math.sin(b) * 9);
-      }
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.restore();
-    } else {
-      ctx.beginPath();
-      ctx.arc(64, 80, 13, 0, Math.PI * 2);
-      ctx.fillStyle = accent;
-      ctx.fill();
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = "#1C1813";
-      ctx.stroke();
-    }
+    // titik warna aksen di bar kiri
+    ctx.beginPath();
+    ctx.arc(64, 80, 13, 0, Math.PI * 2);
+    ctx.fillStyle = accent;
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#1C1813";
+    ctx.stroke();
 
     const label = name.length > 20 ? name.slice(0, 19) + "…" : name;
     ctx.fillStyle = "#1C1813";
@@ -264,9 +249,10 @@ export function createIslands(scene: THREE.Scene, projects: Project[]): IslandsR
     diorama.group.position.set(0, 0, -0.8);
     g.add(diorama.group);
 
-    const label = makeLabel("Beranda", "#E4572E", true);
-    label.position.set(0, 4.6, 0);
-    g.add(label);
+    // label "Zyxcid" yang mengambang DIHAPUS — penanda pulau pusat kini
+    // gerbang GitHub di utara (dibangun playground.ts): objek interaktif,
+    // bukan tulisan. Nama pemilik tetap ada di logo kiri-atas UI.
+    const label: THREE.Sprite | null = null;
 
     const fl = makeFlag(PLAYFUL.coral);
     fl.group.position.set(2.6, 0, -1.8);
@@ -294,10 +280,11 @@ export function createIslands(scene: THREE.Scene, projects: Project[]): IslandsR
       label,
     });
 
+    // bintang di pulau pusat: sebaran ikut melebar bersama pulau
     for (let i = 0; i < 5; i++) {
       const a = (i / 5) * Math.PI * 2;
       starSpots.push(
-        new THREE.Vector3(Math.sin(a) * 3.5, 1.4 + rand() * 1.2, Math.cos(a) * 3.5)
+        new THREE.Vector3(Math.sin(a) * 5.2, 1.4 + rand() * 1.2, Math.cos(a) * 5.2)
       );
     }
   }
@@ -314,7 +301,7 @@ export function createIslands(scene: THREE.Scene, projects: Project[]): IslandsR
     diorama.group.position.set(0, 0, -0.9);
     g.add(diorama.group);
 
-    const label = makeLabel(project.name, project.accent, false);
+    const label = makeLabel(project.name, project.accent);
     label.position.set(0, 4.7, 0);
     g.add(label);
 
@@ -435,7 +422,9 @@ export function createIslands(scene: THREE.Scene, projects: Project[]): IslandsR
   }
 
   // ================= pulau bonus tinggi (skill check) =================
-  const bonusIslands = [1, 4, 6, 8, 9];
+  const bonusIslands = [1, 4, 6, 8, Math.max(0, nodes.length - 1)].filter(
+    (i, k, arr) => i < nodes.length && arr.indexOf(i) === k
+  );
   for (const idx of bonusIslands) {
     const node = nodes[idx];
     const a = node.a + 0.6 + rand() * 0.8;
@@ -506,10 +495,12 @@ export function createIslands(scene: THREE.Scene, projects: Project[]): IslandsR
           h.flag.rotation.y = Math.sin(t * 1.8 + h.bobPhase) * 0.08;
         }
 
-        h.label.position.y =
-          (h.index === 0 ? 4.6 : 4.7) + Math.sin(t * 0.8 + h.bobPhase) * 0.1;
-        const s = activeIndex === h.index ? 1.12 : 1.0;
-        h.label.scale.set(5.6 * s, 1.6 * s, 1);
+        if (h.label) {
+          h.label.position.y =
+            (h.index === 0 ? 4.6 : 4.7) + Math.sin(t * 0.8 + h.bobPhase) * 0.1;
+          const s = activeIndex === h.index ? 1.12 : 1.0;
+          h.label.scale.set(5.6 * s, 1.6 * s, 1);
+        }
       }
     },
     setVisited(index: number) {

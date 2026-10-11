@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { withOutline } from "./structures";
+import { withOutline, type DioramaBlocker } from "./structures";
 import type { IslandHandle } from "./islands";
 
 /**
@@ -64,9 +64,15 @@ interface NpcInternal extends NpcHandle {
   legs: THREE.Mesh[];
   leaf: THREE.Group;
   shadow: THREE.Mesh;
+  /** kotak bangunan di pulaunya (koordinat lokal pulau) — dihindari */
+  blockers: DioramaBlocker[];
 }
 
-export function createNpcs(scene: THREE.Scene, handles: IslandHandle[]): NpcsResult {
+export function createNpcs(
+  scene: THREE.Scene,
+  handles: IslandHandle[],
+  blockersByIsland: Map<number, DioramaBlocker[]> = new Map()
+): NpcsResult {
   const disposables: Array<{ dispose: () => void }> = [];
   const npcs: NpcInternal[] = [];
   const rand = mulberry32(777);
@@ -79,7 +85,12 @@ export function createNpcs(scene: THREE.Scene, handles: IslandHandle[]): NpcsRes
   const darkMat = new THREE.MeshBasicMaterial({ color: 0x1c1813 });
   disposables.push(darkMat);
 
-  const buildNpc = (handle: IslandHandle, localX: number, localZ: number): NpcInternal => {
+  const buildNpc = (
+    handle: IslandHandle,
+    localX: number,
+    localZ: number,
+    blockers: DioramaBlocker[]
+  ): NpcInternal => {
     const color = NPC_COLORS[(handle.index + 1) % NPC_COLORS.length];
     const group = new THREE.Group();
     group.position.set(localX, 0, localZ);
@@ -171,6 +182,7 @@ export function createNpcs(scene: THREE.Scene, handles: IslandHandle[]): NpcsRes
       legs,
       leaf,
       shadow,
+      blockers,
     };
     return npc;
   };
@@ -178,13 +190,15 @@ export function createNpcs(scene: THREE.Scene, handles: IslandHandle[]): NpcsRes
   // satu penghuni per pulau; pulau pusat dapat dua
   handles.forEach((handle) => {
     const count = handle.index === 0 ? 2 : 1;
+    const blockers = blockersByIsland.get(handle.index) ?? [];
     for (let i = 0; i < count; i++) {
       const a = rand() * Math.PI * 2;
       const d = handle.collider.radius * (0.25 + rand() * 0.35);
       const npc = buildNpc(
         handle,
         Math.sin(a) * d,
-        Math.cos(a) * d - (handle.index === 0 ? 1.6 : 0)
+        Math.cos(a) * d - (handle.index === 0 ? 1.6 : 0),
+        blockers
       );
       // kalau pulau pusat, penghuni kedua di sisi lain
       if (handle.index === 0 && i === 1) {
@@ -198,6 +212,14 @@ export function createNpcs(scene: THREE.Scene, handles: IslandHandle[]): NpcsRes
   // tiap NPC: titik dunia di atas kepala untuk bubble
   const tmp = new THREE.Vector3();
   const playerV = new THREE.Vector3();
+
+  /** Apakah titik (lokal pulau) menabrak kotak bangunan? */
+  const hitBlocker = (
+    b: DioramaBlocker[],
+    lx: number,
+    lz: number,
+    pad: number
+  ) => b.some((bl) => Math.abs(lx - bl.cx) < bl.hx + pad && Math.abs(lz - bl.cz) < bl.hz + pad);
 
   return {
     npcs,
@@ -227,17 +249,22 @@ export function createNpcs(scene: THREE.Scene, handles: IslandHandle[]): NpcsRes
         } else if (n.state === "idle") {
           n.idleT -= dt;
           if (n.idleT <= 0) {
-            // pilih tujuan baru dalam pulau
-            const a = Math.random() * Math.PI * 2;
-            const d = n.radius * 0.15 + Math.random() * n.radius * 0.4;
-            const px = n.group.position.x + Math.sin(a) * d;
-            const pz = n.group.position.z + Math.cos(a) * d;
-            if (Math.hypot(px, pz) < n.radius * 0.62) {
-              n.target.set(px, 0, pz);
-              n.state = "walk";
-            } else {
-              n.idleT = 0.6 + Math.random() * 2.4;
+            // pilih tujuan baru dalam pulau (hindari gedung bila ada)
+            let tries = 0;
+            while (tries < 4) {
+              tries += 1;
+              const a = Math.random() * Math.PI * 2;
+              const d = n.radius * 0.15 + Math.random() * n.radius * 0.4;
+              const px = n.group.position.x + Math.sin(a) * d;
+              const pz = n.group.position.z + Math.cos(a) * d;
+              if (Math.hypot(px, pz) < n.radius * 0.62) {
+                if (hitBlocker(n.blockers, px, pz, 0.4)) continue; // jangan masuk gedung
+                n.target.set(px, 0, pz);
+                n.state = "walk";
+                break;
+              }
             }
+            if (n.state !== "walk") n.idleT = 0.6 + Math.random() * 2.4;
           }
         } else {
           // berjalan santai ke tujuan (koordinat lokal pulau)
@@ -252,6 +279,20 @@ export function createNpcs(scene: THREE.Scene, handles: IslandHandle[]): NpcsRes
             n.group.position.x += (lx / len) * step;
             n.group.position.z += (lz / len) * step;
             n.heading = Math.atan2(lx, lz);
+            // pengaman: kalau terdorong masuk kotak gedung → keluarkan & berhenti
+            for (const bl of n.blockers) {
+              const ox = bl.hx + 0.35 - Math.abs(n.group.position.x - bl.cx);
+              if (ox <= 0) continue;
+              const oz = bl.hz + 0.35 - Math.abs(n.group.position.z - bl.cz);
+              if (oz <= 0) continue;
+              if (ox < oz) {
+                n.group.position.x = bl.cx + (n.group.position.x >= bl.cx ? 1 : -1) * (bl.hx + 0.35);
+              } else {
+                n.group.position.z = bl.cz + (n.group.position.z >= bl.cz ? 1 : -1) * (bl.hz + 0.35);
+              }
+              n.state = "idle";
+              n.idleT = 1 + Math.random() * 2;
+            }
             // hop kecil berkala saat jalan
             if (n.hopY <= 0.001 && Math.random() < dt * 2.2) {
               n.hopV = 1.9;

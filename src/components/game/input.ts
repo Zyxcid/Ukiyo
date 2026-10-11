@@ -96,6 +96,10 @@ export class InputManager {
   private onPointerDown = (e: PointerEvent) => {
     if (!this.enabled) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
+    // hanya drag yang MULAI di kanvas permainan — klik/tahan di elemen UI
+    // (roda emote, tombol HUD, joystick) tidak boleh memutar kamera
+    const target = e.target as HTMLElement | null;
+    if (!target || target.tagName !== "CANVAS") return;
     this.dragging = true;
     this.lastX = e.clientX;
     this.lastY = e.clientY;

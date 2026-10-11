@@ -12,11 +12,14 @@ import { format } from "date-fns";
 import { id as idLocale } from "date-fns/locale";
 import {
   ArrowBigUpDash,
+  ArrowDownRight,
   ArrowRight,
   Armchair,
+  Backpack,
   BookOpen,
   CalendarClock,
   Check,
+  CircleDot,
   Crown,
   DoorOpen,
   ExternalLink,
@@ -46,6 +49,7 @@ import {
   Sun,
   Sunrise,
   Sunset,
+  Trophy,
   Users,
   Volume2,
   VolumeX,
@@ -65,7 +69,9 @@ import {
   loadMaxStars,
   loadGoldScarf,
 } from "./emotes";
-import type { PlayerAction } from "./types";
+import { BADGES } from "./playground";
+import { loadBadges, loadVisited, resetAllProgress } from "./progress";
+import type { C4EventMsg, C4Peer, PlayerAction } from "./types";
 
 const emptySubscribe = () => () => {};
 
@@ -92,8 +98,102 @@ const EMOTE_ICONS: Record<string, typeof Hand> = {
   glitter: Sparkles,
 };
 
+/* ================= Connect 4 (lawan: penghuni pulau) ================= */
+const C4_COLS = 7;
+const C4_ROWS = 6;
+const emptyC4 = () =>
+  Array.from({ length: C4_COLS }, () => Array<number>(C4_ROWS).fill(0));
+
+/** cek 4 sejajar; return {p, line} — line = index datar col*6+row */
+function c4Winner(cells: number[][]): { p: number; line: number[] } | null {
+  const at = (c: number, r: number) => cells[c]?.[r] ?? 0;
+  const dirs: Array<[number, number]> = [
+    [1, 0],
+    [0, 1],
+    [1, 1],
+    [1, -1],
+  ];
+  for (let c = 0; c < C4_COLS; c++) {
+    for (let r = 0; r < C4_ROWS; r++) {
+      const p = at(c, r);
+      if (!p) continue;
+      for (const [dc, dr] of dirs) {
+        const line: number[] = [c * 6 + r];
+        let ok = true;
+        for (let k = 1; k < 4; k++) {
+          if (at(c + dc * k, r + dr * k) !== p) {
+            ok = false;
+            break;
+          }
+          line.push((c + dc * k) * 6 + (r + dr * k));
+        }
+        if (ok) return { p, line };
+      }
+    }
+  }
+  return null;
+}
+
+/** baris kosong terbawah di kolom (row 0 = bawah), -1 = penuh */
+function c4DropRow(cells: number[][], col: number): number {
+  for (let r = 0; r < C4_ROWS; r++) if (!cells[col][r]) return r;
+  return -1;
+}
+
+function c4IsFull(cells: number[][]): boolean {
+  return cells.every((col) => col.every((v) => v !== 0));
+}
+
+/** AI penghuni: menang kalau bisa, halau kalau harus, selebihnya suka tengah */
+function c4AiPick(cells: number[][]): number {
+  const tryWin = (p: number) => {
+    for (let c = 0; c < C4_COLS; c++) {
+      const r = c4DropRow(cells, c);
+      if (r < 0) continue;
+      cells[c][r] = p;
+      const w = c4Winner(cells);
+      cells[c][r] = 0;
+      if (w && w.p === p) return c;
+    }
+    return -1;
+  };
+  const win = tryWin(2);
+  if (win >= 0) return win;
+  const block = tryWin(1);
+  if (block >= 0) return block;
+  const order = [3, 2, 4, 1, 5, 0, 6];
+  const valid = order.filter((c) => c4DropRow(cells, c) >= 0);
+  // hindari langkah yang langsung membuka kemenangan pemain tepat di atasnya
+  for (const c of valid) {
+    const r = c4DropRow(cells, c);
+    cells[c][r] = 2;
+    const r2 = c4DropRow(cells, c);
+    let opensWin = false;
+    if (r2 >= 0) {
+      cells[c][r2] = 1;
+      opensWin = !!c4Winner(cells);
+      cells[c][r2] = 0;
+    }
+    cells[c][r] = 0;
+    if (!opensWin) return c;
+  }
+  return valid[0] ?? -1;
+}
+
 function monthsSince(iso: string): number {
   return (Date.now() - new Date(iso).getTime()) / 2.63e9;
+}
+
+/** Validasi papan C4 dari jaringan → bentuk 7×6 berisi 0/1/2 (null = rusak) */
+function sanitizeC4Cells(raw: unknown): number[][] | null {
+  if (!Array.isArray(raw) || raw.length !== C4_COLS) return null;
+  const out: number[][] = [];
+  for (let c = 0; c < C4_COLS; c++) {
+    const col = raw[c];
+    if (!Array.isArray(col) || col.length !== C4_ROWS) return null;
+    out.push(col.map((v) => (v === 1 || v === 2 ? v : 0)));
+  }
+  return out;
 }
 
 /* ================= doodle thumbnail ala index.html ================= */
@@ -237,10 +337,13 @@ export default function UkiyoWorld() {
   const engineRef = useRef<GameEngine | null>(null);
   const bubbleRef = useRef<HTMLDivElement>(null);
   const allVisitedRef = useRef(false);
-  const berandaSeenRef = useRef(false);
   const startedRef = useRef(false);
 
   const { toast } = useToast();
+  const toastRef = useRef(toast);
+  useEffect(() => {
+    toastRef.current = toast;
+  }, [toast]);
 
   const [started, setStarted] = useState(false);
   const isTouch = useSyncExternalStore(
@@ -273,8 +376,6 @@ export default function UkiyoWorld() {
 
   // panel detail
   const [dismissedIsland, setDismissedIsland] = useState<number | null>(null);
-  const [berandaCard, setBerandaCard] = useState(false);
-  const berandaTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const doneHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // pameran gedung proyek (Kanji Hall dkk.)
@@ -289,6 +390,43 @@ export default function UkiyoWorld() {
     galleryIdx?: number;
   } | null>(null);
   const [wheelOpen, setWheelOpen] = useState(false);
+  // kolektibel (panel tas kanan atas) & mainan taman bermain
+  const [collectOpen, setCollectOpen] = useState(false);
+  const [badges, setBadges] = useState<string[]>([]);
+  const [nearToy, setNearToy] = useState<{
+    kind: "swing" | "slide" | "c4" | "github";
+    label: string;
+  } | null>(null);
+  // ---------- Connect 4 ----------
+  // Mode default: lawan = penghuni pulau (AI). Bila tamu lain membuka meja
+  // yang sama, dua klien otomatis berpasangan (protokol "c4" di
+  // multiplayer.ts): AI nonaktif, warna dari urutan id, nama lawan ditampilkan.
+  const [c4Open, setC4Open] = useState(false);
+  const [c4Cells, setC4Cells] = useState<number[][]>(emptyC4);
+  const [c4Turn, setC4Turn] = useState<1 | 2>(1);
+  const [c4Status, setC4Status] = useState<"play" | "win" | "lose" | "draw">(
+    "play"
+  );
+  const [c4WinLine, setC4WinLine] = useState<number[] | null>(null);
+  /** lawan manusia yang sedang berpasangan (null = vs penghuni/AI) */
+  const [c4Opponent, setC4Opponent] = useState<C4Peer | null>(null);
+  /** warna saya (1 merah / 2 kuning) — dihitung saat berpasangan */
+  const [c4MyColor, setC4MyColor] = useState<1 | 2>(1);
+  /** saya cuma menonton dua pemain lain */
+  const [c4Spectator, setC4Spectator] = useState(false);
+  const [c4Peers, setC4Peers] = useState<C4Peer[]>([]);
+  const c4TimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // cermin state untuk dipakai dari event multiplayer (di luar siklus React)
+  const c4CellsRef = useRef<number[][]>(emptyC4());
+  const c4TurnRef = useRef<1 | 2>(1);
+  const c4StatusRef = useRef<"play" | "win" | "lose" | "draw">("play");
+  const c4OpenRef = useRef(false);
+  const c4OppRef = useRef<C4Peer | null>(null);
+  const c4SpecRef = useRef(false);
+  const c4PeersRef = useRef<C4Peer[]>([]);
+  const c4MyIdRef = useRef<string | null>(null);
+  const [resetArm, setResetArm] = useState(false);
+  const resetArmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // pencapaian tersimpan dibaca sekali saat mount (client) — aman: hanya
   // memengaruhi konten roda emote yang tidak dirender saat SSR
   const [maxStarsSaved] = useState(() => loadMaxStars());
@@ -313,18 +451,6 @@ export default function UkiyoWorld() {
       {
       onPlatformChange: (index) => {
         setCurrentPlatform(index);
-        // kartu beranda hanya sekali per sesi (setelah mulai)
-        if (index === 0 && !berandaSeenRef.current && startedRef.current) {
-          berandaSeenRef.current = true;
-          setBerandaCard(true);
-          if (berandaTimerRef.current) clearTimeout(berandaTimerRef.current);
-          berandaTimerRef.current = setTimeout(
-            () => setBerandaCard(false),
-            9000
-          );
-        } else if (index !== 0) {
-          setBerandaCard(false);
-        }
       },
       onVisit: (index) => {
         setVisited((prev) => {
@@ -348,6 +474,16 @@ export default function UkiyoWorld() {
         }
       },
       onNpcNear: (islandIndex) => setNearNpc(islandIndex),
+      onToyNear: (toy) => setNearToy(toy),
+      onOpenConnect4: () => setC4Open(true),
+      onBadgeUnlocked: (badgeId) => {
+        setBadges(loadBadges());
+        const def = BADGES.find((b) => b.id === badgeId);
+        toast({
+          title: "Lencana baru terbuka!",
+          description: `${def?.label ?? badgeId} — ${def?.desc ?? ""}`,
+        });
+      },
       onDoorNear: (islandIndex) => setNearDoor(islandIndex),
       onBuildingInside: (islandIndex) => {
         setInsideIsland(islandIndex);
@@ -417,6 +553,30 @@ export default function UkiyoWorld() {
         });
       },
       onPresence: (n) => setPresence(n),
+      // ---- Connect 4 multiplayer ----
+      onC4Event: (msg) => c4HandleEventRef.current(msg),
+      onC4Peers: (peers) => {
+        c4PeersRef.current = peers;
+        setC4Peers(peers);
+        // lawan pergi (keluar modal / putus / timeout) → penghuni ambil alih
+        const opp = c4OppRef.current;
+        if (opp && !peers.some((p) => p.id === opp.id)) {
+          c4OppRef.current = null;
+          setC4Opponent(null);
+          setC4MyColor(1);
+          if (
+            c4OpenRef.current &&
+            c4StatusRef.current === "play" &&
+            c4TurnRef.current === 2
+          ) {
+            c4ScheduleAiRef.current();
+          }
+          toastRef.current({
+            title: "Lawanmu pergi",
+            description: `${opp.name} meninggalkan meja — penghuni pulau kembali mengambil alih papan.`,
+          });
+        }
+      },
       },
       // host ruang multiplayer dari env — kosong = mode solo (multiplayer off)
       { multiplayerHost: process.env.NEXT_PUBLIC_PARTY_HOST || "" }
@@ -448,7 +608,6 @@ export default function UkiyoWorld() {
 
     return () => {
       delete (window as unknown as { __zyxEngine?: GameEngine }).__zyxEngine;
-      if (berandaTimerRef.current) clearTimeout(berandaTimerRef.current);
       if (doneHintTimerRef.current) clearTimeout(doneHintTimerRef.current);
       engine.dispose();
       engineRef.current = null;
@@ -456,13 +615,32 @@ export default function UkiyoWorld() {
   }, [toast]);
 
   // ---------- input engine aktif hanya saat bermain ----------
+  // CATATAN: roda emote SENGAJA tidak mematikan input — pemain tetap bisa
+  // melihat sekeliling & berjalan saat memilih emote (Q menutup roda).
   useEffect(() => {
     const engine = engineRef.current;
     if (!engine) return;
     engine.setInputEnabled(
-      started && !listOpen && !controlsOpen && !wheelOpen && exhibitIsland === null
+      started && !listOpen && !controlsOpen && !collectOpen && !c4Open && exhibitIsland === null
     );
-  }, [started, listOpen, controlsOpen, wheelOpen, exhibitIsland]);
+  }, [started, listOpen, controlsOpen, collectOpen, c4Open, exhibitIsland]);
+
+  // ---------- pulau yang pernah dikunjungi dipulihkan setelah reload ----------
+  useEffect(() => {
+    const v = loadVisited().filter((i) => i >= 1 && i <= PROJECTS.length);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- sinkronisasi sekali dari localStorage ( sistem eksternal) saat mount; tanpa ini HUD "x/N pulau" selalu mulai dari 0
+    if (v.length) setVisited(new Set(v));
+    setBadges(loadBadges());
+  }, []);
+
+  // ---------- bersihkan timer Connect 4 / reset ----------
+  useEffect(
+    () => () => {
+      if (c4TimeoutRef.current) clearTimeout(c4TimeoutRef.current);
+      if (resetArmTimerRef.current) clearTimeout(resetArmTimerRef.current);
+    },
+    []
+  );
 
   // ---------- gamepad: sambutan saat kontroler dicolok ----------
   useEffect(() => {
@@ -538,52 +716,11 @@ export default function UkiyoWorld() {
     }
   }, [visited, toast]);
 
-  // ---------- tombol pintasan: H (kontrol), Esc (tutup overlay), Q/1-7 (emote) ----------
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      if (k === "escape") {
-        if (wheelOpen) setWheelOpen(false);
-        else if (exhibitIsland !== null) setExhibitIsland(null);
-        else if (listOpen) setListOpen(false);
-        else if (controlsOpen) setControlsOpen(false);
-      }
-      if (k === "h" && started) {
-        if (!listOpen && exhibitIsland === null && !wheelOpen) setControlsOpen((v) => !v);
-      }
-      // roda emote terbuka → angka memutar emote, q menutup
-      if (wheelOpen && started) {
-        if (k === "q") {
-          setWheelOpen(false);
-        } else if (/^[1-7]$/.test(k)) {
-          const def = EMOTES[Number(k) - 1];
-          if (def) {
-            engineRef.current?.playEmote(def.id);
-            setWheelOpen(false);
-          }
-        }
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [started, listOpen, controlsOpen, wheelOpen, exhibitIsland]);
-
   const handleStart = useCallback(() => {
     const engine = engineRef.current;
     if (engine) {
       engine.sfx.ensure(); // aktivasi audio dari gesture user
       engine.setInputEnabled(true);
-      // player mungkin sudah mendarat di pulau pusat saat intro — tampilkan
-      // kartu beranda sekarang (sekali saja per sesi)
-      if (
-        !berandaSeenRef.current &&
-        engine.getDebugState().island === 0
-      ) {
-        berandaSeenRef.current = true;
-        setBerandaCard(true);
-        if (berandaTimerRef.current) clearTimeout(berandaTimerRef.current);
-        berandaTimerRef.current = setTimeout(() => setBerandaCard(false), 9000);
-      }
     }
     startedRef.current = true;
     setStarted(true);
@@ -616,6 +753,368 @@ export default function UkiyoWorld() {
     engineRef.current?.playEmote(id);
     setWheelOpen(false);
   }, []);
+
+  // ---------- Connect 4: state, mode lawan (AI / tamu), jatuhkan disc ----------
+  /** nomor warna saya: merah (1) bila tanpa lawan, atau id saya < id lawan */
+  const c4MyNum = (opp: C4Peer | null = c4OppRef.current): 1 | 2 => {
+    const myId = c4MyIdRef.current;
+    if (!opp || !myId) return 1;
+    return myId < opp.id ? 1 : 2;
+  };
+
+  /** tulis papan ke ref+state+3D sekaligus */
+  const c4Commit = useCallback(
+    (cells: number[][], turn: 1 | 2, status: "play" | "win" | "lose" | "draw", winLine: number[] | null) => {
+      c4CellsRef.current = cells;
+      c4TurnRef.current = turn;
+      c4StatusRef.current = status;
+      setC4Cells(cells);
+      setC4Turn(turn);
+      setC4Status(status);
+      setC4WinLine(winLine);
+      engineRef.current?.setConnect4Board(cells);
+    },
+    []
+  );
+
+  /** papan kosong + giliran merah (pemain 1) */
+  const c4ResetBoard = useCallback(() => {
+    if (c4TimeoutRef.current) clearTimeout(c4TimeoutRef.current);
+    c4Commit(emptyC4(), 1, "play", null);
+  }, [c4Commit]);
+
+  /** berpasangan dengan tamu lain: lawan berganti AI → manusia, papan baru */
+  const c4PairWith = useCallback(
+    (peer: C4Peer, adoptCells?: number[][], adoptTurn?: number) => {
+      const isNew = c4OppRef.current?.id !== peer.id;
+      const myNum = c4MyNum(peer);
+      c4OppRef.current = peer;
+      c4SpecRef.current = false;
+      setC4Opponent(peer);
+      setC4Spectator(false);
+      setC4MyColor(myNum);
+      if (adoptCells) {
+        c4Commit(adoptCells, adoptTurn === 2 ? 2 : 1, "play", null);
+      } else {
+        c4ResetBoard();
+      }
+      if (isNew) {
+        toastRef.current({
+          title: `${peer.name} bergabung di meja!`,
+          description:
+            "Penghuni pulau mundur — sekarang kamu lawan tamu sungguhan. " +
+            (myNum === 1
+              ? "Disc-mu merah, kamu jalan duluan."
+              : "Disc-mu kuning, tunggu giliran."),
+        });
+      }
+    },
+    [c4Commit, c4ResetBoard]
+  );
+
+  /** AI penghuni menjawab — hanya bila TIDAK ada lawan manusia */
+  const c4ScheduleAi = useCallback(() => {
+    if (c4TimeoutRef.current) clearTimeout(c4TimeoutRef.current);
+    c4TimeoutRef.current = setTimeout(() => {
+      if (
+        !c4OpenRef.current ||
+        c4StatusRef.current !== "play" ||
+        c4TurnRef.current !== 2 ||
+        c4OppRef.current
+      ) {
+        return; // modal tertutup / lawan manusia mengambil alih
+      }
+      const aiCells = c4CellsRef.current.map((c) => [...c]);
+      const col2 = c4AiPick(aiCells);
+      if (col2 < 0) {
+        c4Commit(aiCells, 2, "draw", null);
+        return;
+      }
+      const r2 = c4DropRow(aiCells, col2);
+      aiCells[col2][r2] = 2;
+      const w2 = c4Winner(aiCells);
+      if (w2 && w2.p === 2) {
+        c4Commit(aiCells, 2, "lose", w2.line);
+        return;
+      }
+      if (c4IsFull(aiCells)) {
+        c4Commit(aiCells, 2, "draw", null);
+        return;
+      }
+      c4Commit(aiCells, 1, "play", null);
+    }, 620);
+  }, [c4Commit]);
+
+  /** Semua callback C4 di atas ber-dep stabil (c4Commit [] → turunannya
+   *  ikut stabil), jadi cukup disimpan sekali — tanpa perlu disinkron ulang. */
+  const c4ScheduleAiRef = useRef(c4ScheduleAi);
+
+  /** terapkan langkah dari jaringan (lawan bergerak / penonton mensinkron) */
+  const c4ApplyRemoteMove = useCallback(
+    (col: number, p: number) => {
+      if (c4StatusRef.current !== "play") return;
+      if (col < 0 || col >= C4_COLS) return;
+      const cells = c4CellsRef.current.map((c) => [...c]);
+      const row = c4DropRow(cells, col);
+      if (row < 0) return;
+      cells[col][row] = p;
+      const w = c4Winner(cells);
+      const inModal = c4OpenRef.current;
+      const myNum = c4MyNum();
+      if (w) {
+        // hanya lawan yang bisa menang dengan langkahnya di sisi saya
+        c4Commit(
+          cells,
+          p === 1 ? 2 : 1,
+          !inModal || c4SpecRef.current ? "play" : w.p === myNum ? "win" : "lose",
+          w.line
+        );
+        return;
+      }
+      if (c4IsFull(cells)) {
+        c4Commit(cells, p === 1 ? 2 : 1, "draw", null);
+        return;
+      }
+      c4Commit(cells, p === 1 ? 2 : 1, "play", null);
+    },
+    [c4Commit]
+  );
+
+  /** proses pesan c4 dari tamu lain (dipanggil engine → multiplayer) */
+  const c4HandleEvent = useCallback(
+    (e: C4EventMsg) => {
+      const engine = engineRef.current;
+      if (!engine) return;
+      const inModal = c4OpenRef.current;
+      switch (e.sub) {
+        case "hi": {
+          if (!e.id) return;
+          // balas state supaya pendatang/penonton luar langsung tersinkron
+          if (inModal && !c4SpecRef.current) {
+            const opp = c4OppRef.current;
+            engine.sendC4Message({
+              sub: "state",
+              cells: c4CellsRef.current,
+              turn: c4TurnRef.current,
+              paired: !!opp,
+              ...(opp
+                ? {
+                    red: c4MyIdRef.current && c4MyIdRef.current < opp.id
+                      ? c4MyIdRef.current
+                      : opp.id,
+                    yellow:
+                      c4MyIdRef.current && c4MyIdRef.current < opp.id
+                        ? opp.id
+                        : c4MyIdRef.current,
+                  }
+                : {}),
+            });
+          }
+          // saya duluan di meja & belum berpasangan → klaim pasangan ini
+          if (
+            inModal &&
+            !c4OppRef.current &&
+            !c4SpecRef.current &&
+            e.name &&
+            c4MyIdRef.current
+          ) {
+            const myId = c4MyIdRef.current;
+            const red = myId < e.id ? myId : e.id;
+            const yellow = myId < e.id ? e.id : myId;
+            engine.sendC4Message({ sub: "pair", red, yellow });
+            c4PairWith({ id: e.id, name: e.name });
+          }
+          break;
+        }
+        case "pair": {
+          const myId = c4MyIdRef.current;
+          if (!myId || !e.red || !e.yellow || !inModal) return;
+          if (e.red !== myId && e.yellow !== myId) {
+            // dua tamu lain berpasangan — saya penonton di meja ini
+            if (!c4OppRef.current) {
+              c4SpecRef.current = true;
+              setC4Spectator(true);
+            }
+            return;
+          }
+          const otherId = e.red === myId ? e.yellow : e.red;
+          const name =
+            c4PeersRef.current.find((p) => p.id === otherId)?.name ?? "tamu";
+          c4PairWith({ id: otherId, name });
+          break;
+        }
+        case "move": {
+          if (typeof e.col !== "number" || typeof e.p !== "number") return;
+          const opp = c4OppRef.current;
+          if (inModal) {
+            if (c4SpecRef.current) {
+              c4ApplyRemoteMove(e.col, e.p); // menonton: ikut saja
+            } else if (opp && e.id === opp.id) {
+              c4ApplyRemoteMove(e.col, e.p); // langkah lawan saya
+            }
+            // langkah pemain lain (belum berpasangan) → abaikan, akan direset
+          } else {
+            c4ApplyRemoteMove(e.col, e.p); // penonton luar: papan 3D ikut
+          }
+          break;
+        }
+        case "reset": {
+          if (!inModal) return; // penonton luar disinkron lewat state berikutnya
+          const opp = c4OppRef.current;
+          if (!opp || e.id === opp.id || c4SpecRef.current) {
+            if (c4TimeoutRef.current) clearTimeout(c4TimeoutRef.current);
+            c4ResetBoard();
+          }
+          break;
+        }
+        case "state": {
+          const cells = sanitizeC4Cells(e.cells);
+          if (!cells) return;
+          const myId = c4MyIdRef.current;
+          const opp = c4OppRef.current;
+          if (!inModal) {
+            // penonton dari luar modal: papan 3D di pulau ikut terisi
+            c4CellsRef.current = cells;
+            c4TurnRef.current = e.turn === 2 ? 2 : 1;
+            engine.setConnect4Board(cells);
+            return;
+          }
+          if (e.paired && e.red && e.yellow && myId) {
+            if (e.red === myId || e.yellow === myId) {
+              const otherId = e.red === myId ? e.yellow : e.red;
+              if (!opp || opp.id !== otherId) {
+                const name =
+                  c4PeersRef.current.find((p) => p.id === otherId)?.name ?? "tamu";
+                c4PairWith({ id: otherId, name }, cells, e.turn);
+                return;
+              }
+            } else if (!opp && !c4SpecRef.current) {
+              // dua pemain sudah berjalan — saya jadi penonton
+              c4SpecRef.current = true;
+              setC4Spectator(true);
+              c4Commit(cells, e.turn === 2 ? 2 : 1, "play", null);
+              return;
+            }
+          }
+          // state dari lawan (self-heal / reconnect): adopsi
+          if (opp && e.id === opp.id) {
+            c4Commit(cells, e.turn === 2 ? 2 : 1, "play", null);
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    },
+    [c4ApplyRemoteMove, c4Commit, c4PairWith, c4ResetBoard]
+  );
+
+  const c4HandleEventRef = useRef(c4HandleEvent);
+
+  /** modal dibuka/ditutup → aktifkan heartbeat "aku di meja" + bye */
+  useEffect(() => {
+    c4OpenRef.current = c4Open;
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.setC4Active(c4Open);
+    if (c4Open) {
+      // identitas multiplayer untuk warna & nama lawan
+      c4MyIdRef.current = engine.getMpInfo()?.id ?? null;
+      // mulai dari papan yang sedang tersinkron (mis. tadinya menonton)
+      c4Commit(c4CellsRef.current, c4TurnRef.current, c4StatusRef.current, null);
+    } else {
+      // tutup: kalau sedang menunggu AI, batalkan
+      if (c4TimeoutRef.current) clearTimeout(c4TimeoutRef.current);
+      c4SpecRef.current = false;
+      setC4Spectator(false);
+    }
+  }, [c4Open, c4Commit]);
+
+  /** reset & tombol "main lagi" — di-broadcast supaya lawan ikut mulai baru */
+  const c4Reset = useCallback(() => {
+    if (c4TimeoutRef.current) clearTimeout(c4TimeoutRef.current);
+    c4ResetBoard();
+    engineRef.current?.sendC4Message({ sub: "reset" });
+  }, [c4ResetBoard]);
+
+  const c4Drop = useCallback(
+    (col: number) => {
+      if (!c4OpenRef.current || c4StatusRef.current !== "play") return;
+      if (c4SpecRef.current) return; // penonton tidak bisa meletakkan disc
+      const opp = c4OppRef.current;
+      const myNum = c4MyNum(opp);
+      if (opp ? c4TurnRef.current !== myNum : c4TurnRef.current !== 1) return;
+      const cells = c4CellsRef.current.map((c) => [...c]);
+      const row = c4DropRow(cells, col);
+      if (row < 0) return;
+      cells[col][row] = myNum;
+      // broadcast langkah saya ke semua (lawan menerapkan, penonton mensinkron)
+      engineRef.current?.sendC4Message({ sub: "move", col, p: myNum });
+      const w = c4Winner(cells);
+      if (w && w.p === myNum) {
+        c4Commit(cells, myNum, "win", w.line);
+        if (!opp) engineRef.current?.awardBadge("c4champ");
+        return;
+      }
+      if (c4IsFull(cells)) {
+        c4Commit(cells, myNum, "draw", null);
+        return;
+      }
+      c4Commit(cells, myNum === 1 ? 2 : 1, "play", null);
+      // penghuni menjawab hanya bila tidak ada lawan manusia
+      if (!opp) c4ScheduleAi();
+    },
+    [c4Commit, c4ScheduleAi]
+  );
+
+  // ---------- reset total progres (dua langkah, biar tidak kepencet) ----------
+  const handleResetProgress = useCallback(() => {
+    if (!resetArm) {
+      setResetArm(true);
+      if (resetArmTimerRef.current) clearTimeout(resetArmTimerRef.current);
+      resetArmTimerRef.current = setTimeout(() => setResetArm(false), 4500);
+      return;
+    }
+    resetAllProgress();
+    window.location.reload();
+  }, [resetArm]);
+
+  // ---------- tombol pintasan: H (kontrol), Esc (tutup overlay), Q/1-7 (emote) ----------
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const k = e.key.toLowerCase();
+      if (k === "escape") {
+        if (c4Open) setC4Open(false);
+        else if (collectOpen) setCollectOpen(false);
+        else if (wheelOpen) setWheelOpen(false);
+        else if (exhibitIsland !== null) setExhibitIsland(null);
+        else if (listOpen) setListOpen(false);
+        else if (controlsOpen) setControlsOpen(false);
+      }
+      // Connect 4 terbuka → angka menjatuhkan disc di kolom itu
+      if (c4Open && /^[1-7]$/.test(k)) {
+        c4Drop(Number(k) - 1);
+        return;
+      }
+      if (k === "h" && started) {
+        if (!listOpen && exhibitIsland === null && !wheelOpen && !collectOpen && !c4Open) setControlsOpen((v) => !v);
+      }
+      // roda emote terbuka → angka memutar emote, q menutup
+      if (wheelOpen && started) {
+        if (k === "q") {
+          setWheelOpen(false);
+        } else if (/^[1-7]$/.test(k)) {
+          const def = EMOTES[Number(k) - 1];
+          if (def) {
+            engineRef.current?.playEmote(def.id);
+            setWheelOpen(false);
+          }
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [started, listOpen, controlsOpen, wheelOpen, exhibitIsland, collectOpen, c4Open, c4Drop]);
 
   const toggleWheel = useCallback(() => setWheelOpen((v) => !v), []);
 
@@ -725,6 +1224,13 @@ export default function UkiyoWorld() {
   const remainingSteps = TUTORIAL_STEPS.filter((s) => !doneActions.has(s.action));
   const showTutorialCard = started && remainingSteps.length > 0;
 
+  /** giliran saya di Connect 4 (false saat menonton / bukan giliran) */
+  const c4MyTurn =
+    c4Open &&
+    c4Status === "play" &&
+    !c4Spectator &&
+    (c4Opponent ? c4Turn === c4MyColor : c4Turn === 1);
+
   /** Proyek & konten pameran yang sedang terbuka (null = tertutup) */
   const exhibitProject: Project | null =
     exhibitIsland !== null && exhibitIsland >= 1
@@ -816,12 +1322,12 @@ export default function UkiyoWorld() {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={toggleWheel}
+            onClick={() => setCollectOpen(true)}
             className="hand grid h-9 w-9 place-items-center border-2 border-[#1C1813] bg-[#F7B32B] shadow-[3px_3px_0_#1C1813] transition-transform hover:bg-[#1C1813] hover:text-[#F2EDE3] active:translate-x-[2px] active:translate-y-[2px] active:shadow-[1px_1px_0_#1C1813]"
-            aria-label="Buka roda emote (Q)"
-            title="Emote — Q"
+            aria-label="Buka daftar kolektibel (emote, syal, lencana)"
+            title="Kolektibel"
           >
-            <Sparkles className="h-4 w-4" aria-hidden />
+            <Backpack className="h-4 w-4" aria-hidden />
           </button>
           <button
             type="button"
@@ -870,11 +1376,16 @@ export default function UkiyoWorld() {
       </div>
 
       {/* ================= HINT INTERAKSI (desktop, saat dekat) ================= */}
+      {/* catatan: hint "sapa penghuni" disembunyikan selama tutorial masih
+          berjalan — jangan rebut perhatian pemain yang sedang belajar gerak */}
       {started &&
         !isTouch &&
         !talk &&
         !wheelOpen &&
-        (nearDoor !== null || nearNpc !== null || insideNear !== null) && (
+        (nearDoor !== null ||
+          (nearNpc !== null && !showTutorialCard) ||
+          insideNear !== null ||
+          nearToy !== null) && (
           <div className="pointer-events-none absolute bottom-24 left-1/2 z-20 max-w-[min(34rem,calc(100vw-2rem))] -translate-x-1/2">
             {insideNear !== null ? (
               <div className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#E4572E] px-4 py-1.5 font-space text-[10.5px] uppercase tracking-wider text-[#F2EDE3] shadow-[3px_3px_0_#1C1813]">
@@ -896,6 +1407,11 @@ export default function UkiyoWorld() {
               <div className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#E4572E] px-4 py-1.5 font-space text-[10.5px] uppercase tracking-wider text-[#F2EDE3] shadow-[3px_3px_0_#1C1813]">
                 <kbd className="hand border-[1.5px] border-[#F2EDE3] px-1.5 py-0.5 font-space text-[9px]">E</kbd>
                 masuk {(PROJECTS[nearDoor - 1]?.showcase?.building ?? "gedung").toLowerCase()}
+              </div>
+            ) : nearToy !== null ? (
+              <div className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#F7B32B] px-4 py-1.5 font-space text-[10.5px] uppercase tracking-wider text-[#1C1813] shadow-[3px_3px_0_#1C1813]">
+                <kbd className="hand border-[1.5px] border-[#1C1813] px-1.5 py-0.5 font-space text-[9px]">E</kbd>
+                {nearToy.label}
               </div>
             ) : (
               <div className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#F7F2E6]/95 px-4 py-1.5 font-space text-[10.5px] uppercase tracking-wider shadow-[3px_3px_0_#1C1813]">
@@ -1015,36 +1531,6 @@ export default function UkiyoWorld() {
           </>
         )}
       </aside>
-
-      {/* ================= KARTU BERANDA (sekali per sesi) ================= */}
-      <AnimatePresence>
-        {berandaCard && (
-          <motion.div
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 16 }}
-            className="absolute bottom-6 left-4 z-20 w-[min(22rem,calc(100vw-2rem))] sm:left-6"
-          >
-            <div className="hand2 border-[2.5px] border-[#1C1813] bg-[#F7F2E6]/95 p-4 shadow-[5px_5px_0_#1C1813] backdrop-blur-sm">
-              <p className="font-space text-[10px] uppercase tracking-[1.5px] text-[#E4572E]">
-                pulau pusat
-              </p>
-              <p className="mt-1.5 text-sm leading-relaxed text-[#1C1813]/85">
-                Dari sini kamu bisa ke mana saja — pulau-pulau proyek ada di segala
-                arah. Dekati penghuninya dan{" "}
-                {isTouch ? "tekan tombol sapa" : "tekan E"} kalau butuh arah.
-              </p>
-              <button
-                type="button"
-                onClick={() => setBerandaCard(false)}
-                className="mt-2 font-space text-[10px] uppercase tracking-wider text-[#1C1813]/50 underline decoration-dotted hover:text-[#E4572E]"
-              >
-                mengerti
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
       {/* ================= KARTU TUTORIAL (menunggu input) ================= */}
       {showTutorialCard && (
@@ -1482,6 +1968,13 @@ export default function UkiyoWorld() {
                     val: isTouch ? "tombol masuk, di depan pintu" : "E — di depan pintu gedung",
                   },
                   {
+                    icon: Trophy,
+                    label: "taman bermain",
+                    val: isTouch
+                      ? "tombol aksi dekat mainan · bola ditendang dengan jalan"
+                      : "E — ayunan / platform perosotan / meja Connect 4 · bola ditendang dengan jalan",
+                  },
+                  {
                     icon: Sparkles,
                     label: "emote",
                     val: isTouch
@@ -1619,7 +2112,43 @@ export default function UkiyoWorld() {
                   <DoorOpen className="h-5 w-5" aria-hidden />
                   masuk
                 </motion.button>
-              ) : nearNpc !== null ? (
+              ) : nearToy !== null ? (
+                <motion.button
+                  key="toy"
+                  initial={{ opacity: 0, scale: 0.8, y: 8 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.8, y: 8 }}
+                  type="button"
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    talkPress();
+                  }}
+                  className={`hand flex h-14 items-center gap-2 border-2 border-[#1C1813] px-4 font-space text-[11px] uppercase tracking-wider shadow-[3px_3px_0_#1C1813] active:translate-x-[2px] active:translate-y-[2px] active:shadow-[1px_1px_0_#1C1813] ${
+                    nearToy.kind === "github"
+                      ? "bg-[#1C1813] text-[#F2EDE3]"
+                      : "bg-[#F7B32B] text-[#1C1813]"
+                  }`}
+                  style={{ touchAction: "none" }}
+                  aria-label={nearToy.label}
+                >
+                  {nearToy.kind === "swing" ? (
+                    <Armchair className="h-5 w-5" aria-hidden />
+                  ) : nearToy.kind === "slide" ? (
+                    <ArrowDownRight className="h-5 w-5" aria-hidden />
+                  ) : nearToy.kind === "github" ? (
+                    <Github className="h-5 w-5" aria-hidden />
+                  ) : (
+                    <CircleDot className="h-5 w-5" aria-hidden />
+                  )}
+                  {nearToy.kind === "swing"
+                    ? "ayunan"
+                    : nearToy.kind === "slide"
+                      ? "luncur"
+                      : nearToy.kind === "github"
+                        ? "github"
+                        : "main"}
+                </motion.button>
+              ) : nearNpc !== null && !showTutorialCard ? (
                 <motion.button
                   key="sapa"
                   initial={{ opacity: 0, scale: 0.8, y: 8 }}
@@ -1687,7 +2216,7 @@ export default function UkiyoWorld() {
             <div className="hand2 border-[2.5px] border-[#1C1813] bg-[#F7F2E6]/97 p-4 shadow-[6px_6px_0_#1C1813] backdrop-blur-sm">
               <div className="flex items-center justify-between gap-3">
                 <p className="font-space text-[10px] uppercase tracking-[2px] text-[#1C1813]/60">
-                  emote · {effStars}/{starCount.total} bintang
+                  emote milikmu · {effStars}/{starCount.total} bintang
                 </p>
                 <button
                   type="button"
@@ -1699,38 +2228,28 @@ export default function UkiyoWorld() {
                 </button>
               </div>
               <div className="mt-3 grid grid-cols-4 gap-2">
-                {EMOTES.map((def, i) => {
-                  const unlocked = emoteUnlocked(def, effStars, starCount.total);
-                  const need = unlockStars(def, starCount.total);
-                  const Icon = EMOTE_ICONS[def.id] ?? Sparkles;
-                  return (
-                    <button
-                      key={def.id}
-                      type="button"
-                      onClick={() => handleEmotePlay(def.id)}
-                      aria-label={
-                        unlocked
-                          ? `Mainkan emote ${def.label}`
-                          : `Terkunci — butuh ${need} bintang`
-                      }
-                      className={`hand2 flex flex-col items-center gap-1 border-2 border-[#1C1813] px-1.5 pb-2.5 pt-2 transition-transform hover:-translate-y-0.5 ${
-                        unlocked ? "bg-[#F2EDE3]" : "bg-[#E9E1CF] opacity-55"
-                      }`}
-                    >
-                      {unlocked ? (
+                {EMOTES.map((def, i) => ({ def, i }))
+                  .filter(({ def }) => emoteUnlocked(def, effStars, starCount.total))
+                  .map(({ def, i }) => {
+                    const Icon = EMOTE_ICONS[def.id] ?? Sparkles;
+                    return (
+                      <button
+                        key={def.id}
+                        type="button"
+                        onClick={() => handleEmotePlay(def.id)}
+                        aria-label={`Mainkan emote ${def.label}`}
+                        className="hand2 flex flex-col items-center gap-1 border-2 border-[#1C1813] bg-[#F2EDE3] px-1.5 pb-2.5 pt-2 transition-transform hover:-translate-y-0.5"
+                      >
                         <Icon className="h-5 w-5 text-[#E4572E]" aria-hidden />
-                      ) : (
-                        <Lock className="h-4 w-4 text-[#1C1813]/60" aria-hidden />
-                      )}
-                      <span className="font-space text-[9px] uppercase leading-none tracking-wider text-[#1C1813]">
-                        {def.label}
-                      </span>
-                      <span className="font-space text-[8px] leading-none tabular-nums text-[#1C1813]/55">
-                        {unlocked ? i + 1 : `${need}★`}
-                      </span>
-                    </button>
-                  );
-                })}
+                        <span className="font-space text-[9px] uppercase leading-none tracking-wider text-[#1C1813]">
+                          {def.label}
+                        </span>
+                        <span className="font-space text-[8px] leading-none tabular-nums text-[#1C1813]/55">
+                          {i + 1}
+                        </span>
+                      </button>
+                    );
+                  })}
                 {scarfUnlocked && (
                   <button
                     type="button"
@@ -1755,9 +2274,322 @@ export default function UkiyoWorld() {
                 {isTouch
                   ? "ketuk untuk bermain"
                   : "ketuk atau tekan 1–7 · esc menutup"}{" "}
-                · tamu lain juga melihat emotemu
+                · emote lain menunggu di daftar kolektibel (tas kanan atas)
               </p>
             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ================= DAFTAR KOLEKTIBEL (tas kanan atas) ================= */}
+      <AnimatePresence>
+        {collectOpen && started && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 grid place-items-center bg-[rgba(28,24,19,0.45)] p-4"
+            onClick={() => setCollectOpen(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.94, y: 12 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.94, y: 12 }}
+              transition={{ type: "spring", stiffness: 300, damping: 26 }}
+              className="hand2 max-h-[86dvh] w-full max-w-lg overflow-y-auto border-[2.5px] border-[#1C1813] bg-[#F7F2E6] p-6 shadow-[8px_8px_0_#1C1813] sm:p-7"
+              onClick={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-label="Daftar kolektibel"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="font-space text-[10px] uppercase tracking-[2px] text-[#1C1813]/60">
+                    koleksi &amp; pencapaian
+                  </p>
+                  <h2 className="font-dm mt-1 text-4xl italic leading-none">
+                    KOLEKTIBEL
+                  </h2>
+                  <p className="mt-2 font-space text-[10.5px] uppercase tracking-wider text-[#1C1813]/60">
+                    bintang {effStars}/{starCount.total} · lencana{" "}
+                    {badges.length}/{BADGES.length} · emote{" "}
+                    {EMOTES.filter((d) => emoteUnlocked(d, effStars, starCount.total)).length}/
+                    {EMOTES.length}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCollectOpen(false)}
+                  className="hand grid h-10 w-10 shrink-0 place-items-center border-2 border-[#1C1813] hover:bg-[#E4572E] hover:text-[#F2EDE3]"
+                  aria-label="Tutup daftar kolektibel"
+                >
+                  <X className="h-4 w-4" aria-hidden />
+                </button>
+              </div>
+
+              {/* ---------- emote ---------- */}
+              <h3 className="font-space mt-5 flex items-center gap-3 text-[11px] uppercase tracking-[2px] text-[#1C1813]/70">
+                <span className="h-[2px] w-9 bg-[#E4572E]" aria-hidden />
+                emote — tekan Q lalu pilih
+              </h3>
+              <ul className="mt-3 grid grid-cols-2 gap-2">
+                {EMOTES.map((def, i) => {
+                  const unlocked = emoteUnlocked(def, effStars, starCount.total);
+                  const need = unlockStars(def, starCount.total);
+                  const Icon = EMOTE_ICONS[def.id] ?? Sparkles;
+                  return (
+                    <li
+                      key={def.id}
+                      className={`hand2 flex items-center gap-2.5 border-2 border-[#1C1813] p-2.5 ${
+                        unlocked ? "bg-[#F2EDE3]" : "bg-[#E9E1CF] opacity-70"
+                      }`}
+                    >
+                      {unlocked ? (
+                        <Icon className="h-4 w-4 shrink-0 text-[#E4572E]" aria-hidden />
+                      ) : (
+                        <Lock className="h-4 w-4 shrink-0 text-[#1C1813]/60" aria-hidden />
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-[#1C1813]">
+                          {def.label}
+                          {unlocked && (
+                            <span className="ml-1.5 font-space text-[9px] text-[#1C1813]/50">
+                              #{i + 1}
+                            </span>
+                          )}
+                        </p>
+                        <p className="font-space text-[9px] uppercase tracking-wider text-[#1C1813]/55">
+                          {unlocked ? "terbuka" : `butuh ${need} bintang`}
+                        </p>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+
+              {/* ---------- syal emas ---------- */}
+              <div className="hand2 mt-2.5 flex items-center justify-between gap-3 border-2 border-[#1C1813] bg-[#F2EDE3] p-2.5">
+                <div className="flex items-center gap-2.5">
+                  <Crown className="h-4 w-4 shrink-0 text-[#E4572E]" aria-hidden />
+                  <div>
+                    <p className="text-xs font-bold text-[#1C1813]">Syal emas</p>
+                    <p className="font-space text-[9px] uppercase tracking-wider text-[#1C1813]/55">
+                      {scarfUnlocked
+                        ? scarfOn
+                          ? "dipakai"
+                          : "terbuka — belum dipakai"
+                        : `kumpulkan semua ${starCount.total} bintang`}
+                    </p>
+                  </div>
+                </div>
+                {scarfUnlocked && (
+                  <button
+                    type="button"
+                    onClick={toggleScarf}
+                    aria-pressed={scarfOn}
+                    className="hand border-2 border-[#1C1813] bg-[#F7B32B] px-2.5 py-1.5 font-space text-[10px] uppercase tracking-wider hover:bg-[#1C1813] hover:text-[#F2EDE3]"
+                  >
+                    {scarfOn ? "lepas" : "pakai"}
+                  </button>
+                )}
+              </div>
+
+              {/* ---------- lencana taman bermain ---------- */}
+              <h3 className="font-space mt-5 flex items-center gap-3 text-[11px] uppercase tracking-[2px] text-[#1C1813]/70">
+                <span className="h-[2px] w-9 bg-[#E4572E]" aria-hidden />
+                lencana taman bermain
+              </h3>
+              <ul className="mt-3 grid gap-2">
+                {BADGES.map((b) => {
+                  const got = badges.includes(b.id);
+                  return (
+                    <li
+                      key={b.id}
+                      className={`hand2 flex items-center gap-3 border-2 border-[#1C1813] p-2.5 ${
+                        got ? "bg-[#E4572E]/12" : "bg-[#E9E1CF] opacity-75"
+                      }`}
+                    >
+                      {got ? (
+                        <Check className="h-4 w-4 shrink-0 text-[#E4572E]" aria-hidden />
+                      ) : (
+                        <Lock className="h-4 w-4 shrink-0 text-[#1C1813]/60" aria-hidden />
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-[#1C1813]">{b.label}</p>
+                        <p className="font-space text-[9px] uppercase tracking-wider text-[#1C1813]/55">
+                          {b.desc}
+                        </p>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+
+              {/* ---------- reset ---------- */}
+              <div className="hand2 mt-5 flex items-center justify-between gap-3 border-2 border-dashed border-[#1C1813]/45 p-3">
+                <p className="text-[11px] leading-relaxed text-[#1C1813]/60">
+                  Progres (bintang, kunjungan, lencana, emote) tersimpan di
+                  perangkat ini — reload halaman tidak menghapusnya.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleResetProgress}
+                  className={`hand flex shrink-0 items-center gap-2 border-2 border-[#1C1813] px-3 py-2 font-space text-[10px] uppercase tracking-wider ${
+                    resetArm
+                      ? "bg-[#E4572E] text-[#F2EDE3]"
+                      : "bg-[#F2EDE3] hover:bg-[#1C1813] hover:text-[#F2EDE3]"
+                  }`}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+                  {resetArm ? "yakin? klik lagi" : "mulai dari awal"}
+                </button>
+              </div>
+              <p className="mt-4 font-space text-[10px] uppercase tracking-wider text-[#1C1813]/50">
+                esc — kembali ke permainan
+              </p>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ================= CONNECT 4 (meja taman bermain) ================= */}
+      <AnimatePresence>
+        {c4Open && started && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 grid place-items-center bg-[rgba(28,24,19,0.45)] p-4"
+            onClick={() => setC4Open(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.94, y: 12 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.94, y: 12 }}
+              transition={{ type: "spring", stiffness: 300, damping: 26 }}
+              className="hand2 w-full max-w-md border-[2.5px] border-[#1C1813] bg-[#F7F2E6] p-5 shadow-[8px_8px_0_#1C1813] sm:p-6"
+              onClick={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-label="Permainan Connect 4"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="font-space text-[10px] uppercase tracking-[2px] text-[#1C1813]/60">
+                    meja taman bermain
+                  </p>
+                  <h2 className="font-dm mt-1 text-4xl italic leading-none">
+                    CONNECT <em className="text-[#E4572E]">4</em>
+                  </h2>
+                  <p
+                    className="mt-1.5 flex items-center gap-1.5 font-space text-[10px] uppercase tracking-wider text-[#1C1813]/70"
+                    aria-live="polite"
+                  >
+                    <Users className="h-3 w-3 text-[#E4572E]" aria-hidden />
+                    lawan: {" "}
+                    {c4Spectator
+                      ? "dua pemain sedang bermain"
+                      : c4Opponent
+                        ? `${c4Opponent.name} (tamu lain) · kamu ${
+                            c4MyColor === 1 ? "merah" : "kuning"
+                          }`
+                        : "penghuni pulau (komputer)"}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setC4Open(false)}
+                  className="hand grid h-10 w-10 shrink-0 place-items-center border-2 border-[#1C1813] hover:bg-[#E4572E] hover:text-[#F2EDE3]"
+                  aria-label="Tutup Connect 4"
+                >
+                  <X className="h-4 w-4" aria-hidden />
+                </button>
+              </div>
+
+              <p className="mt-2.5 text-[13px] leading-relaxed text-[#1C1813]/75">
+                {c4Status === "play" &&
+                  (c4Spectator
+                    ? "Kamu menonton dua tamu yang sedang saling lawan — papan di pulau ikut bergerak."
+                    : c4Opponent
+                      ? c4MyTurn
+                        ? "Giliranmu — klik kolom (atau tekan 1–7) untuk menjatuhkan disc-mu."
+                        : `${c4Opponent.name} sedang bergerak…`
+                      : c4Turn === 1
+                        ? "Giliranmu — klik kolom (atau tekan 1–7) untuk menjatuhkan disc merah."
+                        : "Penghuni sedang berpikir…")}
+                {c4Status === "win" &&
+                  (c4Opponent
+                    ? `Kamu menang lawan ${c4Opponent.name}! Papan 3D di pulau ikut tersimpan.`
+                    : "Kamu menang! Lencana Juara Connect 4 milikmu — papan 3D di pulau ikut tersimpan.")}
+                {c4Status === "lose" &&
+                  (c4Opponent
+                    ? `${c4Opponent.name} menang ronde ini. Coba lagi!`
+                    : "Penghuni menang ronde ini. Coba lagi — dia suka kolom tengah.")}
+                {c4Status === "draw" && "Papan penuh — seri. Ulang?"}
+              </p>
+
+              {/* papan: kolom = tombol; baris digambar dari atas (row 5) ke bawah (row 0) */}
+              <div className="hand2 mt-4 border-[2.5px] border-[#1C1813] bg-[#E9E1CF] p-2 shadow-[4px_4px_0_#1C1813]">
+                <div className="grid grid-cols-7 gap-1.5">
+                  {Array.from({ length: C4_COLS }, (_, c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => c4Drop(c)}
+                      disabled={c4Status !== "play" || !c4MyTurn}
+                      aria-label={`Jatuhkan disc di kolom ${c + 1}`}
+                      className="group flex flex-col gap-1.5"
+                    >
+                      <span className="hidden font-space text-[8px] uppercase text-[#1C1813]/0 group-hover:text-[#1C1813]/70 sm:block">
+                        {c + 1}
+                      </span>
+                      {Array.from({ length: C4_ROWS }, (_, k) => {
+                        const r = C4_ROWS - 1 - k;
+                        const v = c4Cells[c]?.[r] ?? 0;
+                        const inWin = c4WinLine?.includes(c * 6 + r);
+                        return (
+                          <span
+                            key={r}
+                            className={`grid aspect-square w-full place-items-center rounded-full border-2 border-[#1C1813] transition-colors ${
+                              v === 1
+                                ? "bg-[#E4572E]"
+                                : v === 2
+                                  ? "bg-[#F7B32B]"
+                                  : "bg-[#F7F2E6] group-hover:bg-[#F2EDE3] group-disabled:bg-[#F7F2E6]"
+                            } ${inWin ? "outline outline-2 outline-offset-1 outline-[#1C1813]" : ""}`}
+                            aria-hidden
+                          />
+                        );
+                      })}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center gap-2.5">
+                {c4Status !== "play" && (
+                  <button
+                    type="button"
+                    onClick={c4Reset}
+                    className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#E4572E] px-4 py-2.5 font-space text-[11px] uppercase tracking-wider text-[#F2EDE3] shadow-[3px_3px_0_#1C1813] hover:bg-[#1C1813]"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+                    main lagi
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setC4Open(false)}
+                  className="hand flex items-center gap-2 border-2 border-[#1C1813] bg-[#F7F2E6] px-4 py-2.5 font-space text-[11px] uppercase tracking-wider text-[#1C1813] shadow-[3px_3px_0_#1C1813] hover:bg-[#1C1813] hover:text-[#F2EDE3]"
+                >
+                  kembali ke permainan
+                </button>
+                <p className="w-full font-space text-[10px] uppercase tracking-wider text-[#1C1813]/50">
+                  esc — kembali · menang lawan penghuni = lencana “Juara Connect 4”
+                  {c4Peers.length > 0
+                    ? ` · ${c4Peers.length} tamu lain sedang membuka meja ini`
+                    : ""}
+                </p>
+              </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -1792,17 +2624,6 @@ export default function UkiyoWorld() {
               >
                 mulai
               </button>
-              <p className="mt-4 font-space text-[10px] uppercase tracking-wider text-[#1C1813]/50">
-                kendali muncul sebentar setelah mulai ·{" "}
-                <a
-                  href={GITHUB_PROFILE}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-[#E4572E] underline decoration-dotted"
-                >
-                  github.com/Zyxcid
-                </a>
-              </p>
             </div>
           </motion.div>
         )}

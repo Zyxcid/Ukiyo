@@ -12,6 +12,35 @@ export interface PlatformCollider {
 /** Aksi pemain — dipakai sistem tutorial (menunggu input sungguhan) */
 export type PlayerAction = "move" | "jump" | "djump" | "dash" | "talk";
 
+/** Tamu lain yang sedang membuka meja Connect 4 (dari multiplayer) */
+export interface C4Peer {
+  id: string;
+  name: string;
+}
+
+/** Pesan Connect 4 lintas klien (lihat multiplayer.ts — protokol "c4") */
+export interface C4EventMsg {
+  sub: "hi" | "bye" | "pair" | "move" | "reset" | "state";
+  /** id pengirim */
+  id: string;
+  /** sub "hi": nama pengirim */
+  name?: string;
+  /** sub "pair"/"state": id pemain merah (giliran pertama) */
+  red?: string;
+  /** sub "pair"/"state": id pemain kuning */
+  yellow?: string;
+  /** sub "move": kolom yang dijatuhkan (0-6) */
+  col?: number;
+  /** sub "move": warna disc (1 merah / 2 kuning) */
+  p?: number;
+  /** sub "state": isi papan 7×6 */
+  cells?: number[][];
+  /** sub "state": giliran saat ini */
+  turn?: number;
+  /** sub "state": pengirim sudah berpasangan? */
+  paired?: boolean;
+}
+
 export interface EngineCallbacks {
   /** Dipanggil saat karakter mendarat di pulau proyek (index) / null saat lepas */
   onPlatformChange: (index: number | null) => void;
@@ -44,6 +73,13 @@ export interface EngineCallbacks {
   onScarfUnlock?: () => void;
   /** Dipanggil saat pemain menyapa NPC — null saat bubble selesai */
   onTalk: (info: { islandIndex: number; quote: string } | null) => void;
+  /** Mainan taman bermain terdekat berubah (null = tidak dekat apa pun).
+   *  Dipakai untuk hint E dan tombol aksi layar sentuh. */
+  onToyNear?: (toy: { kind: "swing" | "slide" | "c4" | "github"; label: string } | null) => void;
+  /** Pemain menekan E di meja Connect 4 — buka modal permainan */
+  onOpenConnect4?: () => void;
+  /** Lencana taman bermain baru terbuka */
+  onBadgeUnlocked?: (badgeId: string) => void;
   /** Dipanggil saat bintang terkumpul */
   onStar: (collected: number, total: number) => void;
   /** Dipanggil saat semua bintang terkumpul */
@@ -51,6 +87,12 @@ export interface EngineCallbacks {
   /** Multiplayer presence: jumlah tamu online (termasuk diri sendiri).
    *  0 / tidak pernah dipanggil = tidak terhubung (mode solo). */
   onPresence?: (count: number) => void;
+  /** Pesan Connect 4 dari tamu lain (hi/pair/move/reset/state) — diteruskan
+   *  multiplayer.ts ke UI yang mengelola state permainan. */
+  onC4Event?: (msg: C4EventMsg) => void;
+  /** Daftar tamu yang sedang membuka meja Connect 4 berubah (heartbeat/bye/
+   *  timeout) — dipakai UI untuk tahu lawan hadir/pergi. */
+  onC4Peers?: (peers: C4Peer[]) => void;
 }
 
 /**

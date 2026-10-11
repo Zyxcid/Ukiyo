@@ -43,8 +43,8 @@ export const EMOTES: EmoteDef[] = [
   { id: "glitter", label: "Konfeti", frac: 0.78, dur: 1.8, fx: "confetti" },
 ];
 
-const LS_MAX_STARS = "ukiyo:maxStars";
-const LS_GOLD_SCARF = "ukiyo:goldScarf";
+export const LS_MAX_STARS = "ukiyo:maxStars";
+export const LS_GOLD_SCARF = "ukiyo:goldScarf";
 
 export function loadMaxStars(): number {
   try {

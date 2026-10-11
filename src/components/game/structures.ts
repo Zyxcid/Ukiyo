@@ -27,6 +27,23 @@ export interface Diorama {
   /** Titik pintu gedung (bila diorama punya bangunan masuk-able) —
    *  dipakai engine untuk deteksi kedekatan pemain. */
   door?: THREE.Object3D;
+  /** Kotak sumbu (AABB) penghalang bangunan — dalam koordinat LOKAL PULAU
+   *  (sudah termasuk offset diorama yang berada di z=-0.9). Pemain dan
+   *  penghuni NPC didorong keluar dari kotak ini supaya tidak menembus
+   *  tembok gedung. Pemain di atas `top` (mis. melompati atap) diabaikan. */
+  blockers?: DioramaBlocker[];
+}
+
+/** AABB penghalang bangunan (koordinat lokal pulau — lihat Diorama.blockers) */
+export interface DioramaBlocker {
+  /** pusat kotak */
+  cx: number;
+  cz: number;
+  /** setengah-lebar (X) dan setengah-kedalaman (Z) */
+  hx: number;
+  hz: number;
+  /** tinggi atas lokal — pemain lebih tinggi dari ini tidak diblokir */
+  top: number;
 }
 
 type Toon = (color: number) => THREE.MeshToonMaterial;
@@ -61,24 +78,6 @@ function cyl(
 function sph(r: number, mat: THREE.Material, outline = false) {
   const m = new THREE.Mesh(new THREE.SphereGeometry(r, 18, 14), mat);
   return outline ? withOutline(m, 1.07) : m;
-}
-
-/** Tekstur kanvas sederhana (papan nama dengan teks) */
-function textBoardTexture(text: string, accent: string) {
-  const cv = document.createElement("canvas");
-  cv.width = 256;
-  cv.height = 128;
-  const g = cv.getContext("2d")!;
-  g.fillStyle = "#F7F2E6";
-  g.fillRect(0, 0, 256, 128);
-  g.fillStyle = accent;
-  g.fillRect(0, 0, 14, 128);
-  g.fillStyle = "#1C1813";
-  g.font = "italic 700 64px 'DM Serif Display', Georgia, serif";
-  g.textAlign = "center";
-  g.textBaseline = "middle";
-  g.fillText(text, 142, 68);
-  return new THREE.CanvasTexture(cv);
 }
 
 // ================= 1. KOMAH — skuter ojek =================
@@ -444,9 +443,17 @@ function buildKanjiHall(ctx: DioramaContext): Diorama {
   door.position.set(0, 0.5, 2.05);
   g.add(door);
 
+  // ---- kotak penghalang (pemain & NPC tidak menembus gedung) ----
+  // koordinat LOKAL PULAU: diorama sendiri berdiri di z=-0.9,
+  // platform pusatnya di z=-0.2 setengah 1.6 → pusat z=-1.1
+  const blockers: DioramaBlocker[] = [
+    { cx: 0, cz: -1.1, hx: 1.95, hz: 1.6, top: 3.4 },
+  ];
+
   return {
     group: g,
     door,
+    blockers,
     update(t) {
       // lampion bergoyang lembut
       lanterns.forEach((l, i) => {
@@ -524,65 +531,7 @@ function buildPadlock(ctx: DioramaContext): Diorama {
   return { group: g };
 }
 
-// ================= 4. ZYXCID — papan selamat datang + bendera =================
-function buildSignpost(ctx: DioramaContext): Diorama {
-  const { toon, accent, disposables } = ctx;
-  const g = new THREE.Group();
-  const wood = toon(0x8a7a5e);
-  const cream = toon(PLAYFUL.cream);
-
-  const pole = box(0.16, 2.6, 0.16, wood, true);
-  pole.position.set(-0.9, 1.3, 0);
-  g.add(pole);
-  const pole2 = box(0.12, 1.9, 0.12, wood);
-  pole2.position.set(0.95, 0.95, 0);
-  g.add(pole2);
-
-  const tex = textBoardTexture("Zyx", "#E4572E");
-  disposables.push(tex);
-  const boardMats = [
-    wood,
-    wood,
-    wood,
-    wood,
-    new THREE.MeshToonMaterial({ map: tex }),
-    new THREE.MeshToonMaterial({ map: tex }),
-  ];
-  disposables.push(...boardMats.slice(4));
-  const board = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.85, 0.1), boardMats);
-  board.position.set(-0.9, 2.0, 0.09);
-  g.add(board);
-  const boardSh = new THREE.Mesh(board.geometry, OUTLINE_MAT);
-  boardSh.scale.setScalar(1.05);
-  board.add(boardSh);
-
-  // tali bendera segitiga
-  const flagColors = [accent, PLAYFUL.mint, PLAYFUL.lemon, PLAYFUL.sky, PLAYFUL.berry];
-  const flags: THREE.Mesh[] = [];
-  for (let i = 0; i < 5; i++) {
-    const f = new THREE.Mesh(
-      new THREE.ConeGeometry(0.17, 0.38, 4),
-      toon(flagColors[i % flagColors.length])
-    );
-    f.rotation.x = Math.PI;
-    f.rotation.y = Math.PI / 4;
-    const t = (i + 1) / 6;
-    f.position.set(-0.9 + t * 1.85, 2.5 - Math.sin(t * Math.PI) * 0.28, 0);
-    g.add(f);
-    flags.push(f);
-  }
-
-  return {
-    group: g,
-    update(t) {
-      flags.forEach((f, i) => {
-        f.rotation.z = Math.sin(t * 2.4 + i) * 0.18;
-      });
-    },
-  };
-}
-
-// ================= 5. T3R — jam raksasa + mata 20-20-20 =================
+// ================= 4. T3R — jam raksasa + mata 20-20-20 =================
 function buildClock(ctx: DioramaContext): Diorama {
   const { toon, accent } = ctx;
   const g = new THREE.Group();
@@ -642,7 +591,7 @@ function buildClock(ctx: DioramaContext): Diorama {
   };
 }
 
-// ================= 6. ALINE-CONFIGURATOR — 5 keycap makropad =================
+// ================= 5. ALINE-CONFIGURATOR — 5 keycap makropad =================
 function buildKeycaps(ctx: DioramaContext): Diorama {
   const { toon } = ctx;
   const g = new THREE.Group();
@@ -670,7 +619,7 @@ function buildKeycaps(ctx: DioramaContext): Diorama {
   return { group: g };
 }
 
-// ================= 7. EDUTRACK — grafik + topi wisuda =================
+// ================= 6. EDUTRACK — grafik + topi wisuda =================
 function buildGradCap(ctx: DioramaContext): Diorama {
   const { toon, accent } = ctx;
   const g = new THREE.Group();
@@ -713,7 +662,7 @@ function buildGradCap(ctx: DioramaContext): Diorama {
   };
 }
 
-// ================= 8. APLIKASICUACA — awan + matahari + hujan =================
+// ================= 7. APLIKASICUACA — awan + matahari + hujan =================
 function buildWeather(ctx: DioramaContext): Diorama {
   const { toon, accent } = ctx;
   const g = new THREE.Group();
@@ -764,7 +713,7 @@ function buildWeather(ctx: DioramaContext): Diorama {
   };
 }
 
-// ================= 9. IDCAMP-2023 — papan kode + tenda =================
+// ================= 8. IDCAMP-2023 — papan kode + tenda =================
 function buildCodeCamp(ctx: DioramaContext): Diorama {
   const { toon, accent } = ctx;
   const g = new THREE.Group();
@@ -806,7 +755,7 @@ function buildCodeCamp(ctx: DioramaContext): Diorama {
   return { group: g };
 }
 
-// ================= 10. TURN-BASED-RPG-IN-C — pedang di batu + dadu =================
+// ================= 9. TURN-BASED-RPG-IN-C — pedang di batu + dadu =================
 function buildSwordStone(ctx: DioramaContext): Diorama {
   const { toon, accent } = ctx;
   const g = new THREE.Group();
@@ -971,13 +920,12 @@ export function buildDiorama(
     case 0: return buildScooter(ctx);
     case 1: return buildKanjiHall(ctx);
     case 2: return buildPadlock(ctx);
-    case 3: return buildSignpost(ctx);
-    case 4: return buildClock(ctx);
-    case 5: return buildKeycaps(ctx);
-    case 6: return buildGradCap(ctx);
-    case 7: return buildWeather(ctx);
-    case 8: return buildCodeCamp(ctx);
-    case 9: return buildSwordStone(ctx);
+    case 3: return buildClock(ctx);
+    case 4: return buildKeycaps(ctx);
+    case 5: return buildGradCap(ctx);
+    case 6: return buildWeather(ctx);
+    case 7: return buildCodeCamp(ctx);
+    case 8: return buildSwordStone(ctx);
     default: return buildHub(ctx);
   }
 }
